@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for dedicated Doctor Lab Orders screen in the sidebar with patient search (by name, token number, or registration ID), default current-day patient filtering, patient queue cards with test checklists, sample collection tracking, and test result entry.",
+  "updatedAt":  "2026-10-24T10:22:34.045824878Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

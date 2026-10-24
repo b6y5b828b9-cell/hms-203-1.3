@@ -1,0 +1,11 @@
+{
+  "name": "Hospital Management System",
+  "description": "Real-time hospital management platform for patient medical records tracking, dynamic appointment scheduling, and secure billing and invoices.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
