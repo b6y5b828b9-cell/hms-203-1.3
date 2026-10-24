@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AlertCircle, CalendarCheck, CheckCircle2, Edit3, Eraser, FileText, MapPin, Phone, Printer, Save, Search, Ticket, UserPlus, UserRound, X } from 'lucide-react';
+import { AlertCircle, CalendarCheck, CheckCircle2, Edit3, Eraser, FileText, MapPin, Phone, Printer, Save, Search, Ticket, UserPlus, UserRound, Video, X } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { Appointment, Patient, PaymentSchemeType, ReceptionToken, TokenPaymentScheme } from '../types';
 import { printReceptionToken } from '../utils/printReceptionToken';
@@ -7,7 +7,7 @@ import { parseInsuranceDeductible } from '../utils/insuranceInvoice';
 import { PatientAvatar } from './PatientAvatar';
 
 interface PatientRegistrationDeskProps {
-  onOpenNewPatient: () => void;
+  onOpenNewPatient: (isTelehealthPatient?: boolean) => void;
   onEditPatient: (patientId: string) => void;
 }
 
@@ -21,6 +21,7 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
     appointments,
     receptionTokens,
     createReceptionToken,
+    updatePatient,
     updateAppointmentStatus,
     advanceTokenWorkflow,
     addNotification,
@@ -44,6 +45,9 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
   const [visitInsurancePolicyNumber, setVisitInsurancePolicyNumber] = useState('');
   const [visitInsuranceNetwork, setVisitInsuranceNetwork] = useState('');
   const [visitEmergencyPhone, setVisitEmergencyPhone] = useState('');
+  const [isTelehealthPatient, setIsTelehealthPatient] = useState(false);
+  const [newRegistrationIsTelehealth, setNewRegistrationIsTelehealth] = useState(false);
+  const [includePendingServices, setIncludePendingServices] = useState(false);
   const [saving, setSaving] = useState(false);
   const [registrationTab, setRegistrationTab] = useState<'new' | 'existing' | 'appointment' | 'reprint' | 'edit' | 'change-token'>('existing');
   const [lastRegisteredToken, setLastRegisteredToken] = useState<ReceptionToken | null>(null);
@@ -169,6 +173,9 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
     setVisitInsurancePolicyNumber('');
     setVisitInsuranceNetwork('');
     setVisitEmergencyPhone('');
+    setIsTelehealthPatient(false);
+    setNewRegistrationIsTelehealth(false);
+    setIncludePendingServices(false);
     setRegistrationType('Consultation');
     setAssignedDoctorId('');
     setVisitDepartment('');
@@ -248,7 +255,13 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
       ...selectedPatient.emergencyContact,
       phone: visitEmergencyPhone.trim() || selectedPatient.emergencyContact.phone,
     };
+    const pendingServiceIds = registrationType === 'Non-Consultation' && includePendingServices
+      ? (selectedPatient.services || [])
+          .filter((service) => service.billingStatus !== 'Billed' && service.billingStatus !== 'Cancelled')
+          .map((service) => service.id)
+      : [];
 
+    updatePatient(selectedPatient.id, { isTelehealthPatient });
     const token = createReceptionToken({
       patientId: selectedPatient.id,
       patientName: `${selectedPatient.firstName} ${selectedPatient.lastName}`,
@@ -282,6 +295,7 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
         ? `${walkInDepartment} • ${selectedPhysio} • ${walkInPurpose}`
         : `${walkInDepartment} • ${assignedDoctor?.name || selectedPatient.primaryPhysicianName || 'Registration Desk'} • ${walkInPurpose}`,
       paymentScheme,
+      pendingServiceIds,
       historyLogs: [
         {
           stage: '1_REGISTRATION',
@@ -302,6 +316,14 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
       'success',
       selectedPatient.id
     );
+    if (pendingServiceIds.length) {
+      addNotification(
+        'Pending Services Carried Forward',
+        `${pendingServiceIds.length} service(s) linked to ${token.tokenNumber} for cashier review.`,
+        'info',
+        selectedPatient.id
+      );
+    }
     if (registrationType === 'Consultation' && assignedDoctor) {
       addNotification(
         'Doctor Walk-in Alert',
@@ -465,7 +487,7 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
     <div className="p-3 sm:p-4 lg:p-5 space-y-3 max-w-[1400px] mx-auto text-xs">
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
         <div className="flex items-center gap-3"><div className="w-9 h-9 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center"><UserRound className="w-5 h-5 text-blue-600" /></div><div><h1 className="text-lg font-bold text-slate-900">Patient Registration</h1><p className="text-slate-500 mt-0.5">Register new patients, search existing patients, manage appointments, or edit patient details.</p></div></div>
-        <div className="flex items-center gap-2 self-end"><button onClick={() => setRegistrationTab('existing')} className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-600 font-semibold flex items-center gap-1.5 cursor-pointer"><Search className="w-3.5 h-3.5" /> Quick Jump</button><button onClick={onOpenNewPatient} className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold flex items-center gap-1.5 cursor-pointer"><UserPlus className="w-3.5 h-3.5" /> Create / Action</button></div>
+        <div className="flex items-center gap-2 self-end"><button onClick={() => setRegistrationTab('existing')} className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-600 font-semibold flex items-center gap-1.5 cursor-pointer"><Search className="w-3.5 h-3.5" /> Quick Jump</button><button onClick={() => onOpenNewPatient()} className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold flex items-center gap-1.5 cursor-pointer"><UserPlus className="w-3.5 h-3.5" /> Create / Action</button></div>
       </div>
 
       <div className="flex flex-wrap gap-1 border-b border-slate-200 bg-white rounded-t-xl px-2 pt-2">
@@ -480,9 +502,6 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
               if (tab === 'reprint') {
                 setSelectedReprintTokenId('');
                 setTokenQuery('');
-              }
-              if (tab === 'new') {
-                onOpenNewPatient();
               }
             }}
             className={`px-4 py-2.5 rounded-t-lg font-semibold flex items-center gap-1.5 border-b-2 cursor-pointer ${registrationTab === tab ? 'bg-teal-600 border-teal-600 text-white' : 'border-transparent text-slate-500 hover:bg-slate-50'}`}
@@ -541,10 +560,27 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={onOpenNewPatient} className="px-4 py-2 rounded-lg bg-teal-600 text-white font-bold flex items-center gap-1.5 cursor-pointer"><Save className="w-3.5 h-3.5" /> Open Full Form</button>
+                <button onClick={() => onOpenNewPatient(newRegistrationIsTelehealth)} className="px-4 py-2 rounded-lg bg-teal-600 text-white font-bold flex items-center gap-1.5 cursor-pointer"><Save className="w-3.5 h-3.5" /> Open Full Form</button>
                 <button onClick={clearForm} className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 font-bold flex items-center gap-1.5 cursor-pointer"><Eraser className="w-3.5 h-3.5" /> Clear</button>
               </div>
             </div>
+
+            <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-200 bg-cyan-50 p-4">
+              <input
+                type="checkbox"
+                checked={newRegistrationIsTelehealth}
+                onChange={(event) => setNewRegistrationIsTelehealth(event.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-cyan-400 text-cyan-600 focus:ring-cyan-500"
+              />
+              <span>
+                <span className="flex items-center gap-2 text-sm font-semibold text-cyan-900">
+                  <Video className="h-4 w-4" /> Register as telehealth patient
+                </span>
+                <span className="mt-1 block text-xs text-cyan-800">
+                  This selection will be carried into the new patient form.
+                </span>
+              </span>
+            </label>
 
             <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-3">
               <div className="flex items-center gap-2 font-bold text-blue-900">
@@ -570,7 +606,7 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
               </div>
 
               <button
-                onClick={onOpenNewPatient}
+                onClick={() => onOpenNewPatient(newRegistrationIsTelehealth)}
                 className="px-4 py-2.5 rounded-lg bg-blue-600 text-white font-bold flex items-center gap-2 cursor-pointer"
               >
                 <UserPlus className="w-4 h-4" /> Launch New Patient Module
@@ -590,6 +626,8 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
           setSelectedPatientId={(id: string) => {
             const patient = patients.find((item) => item.id === id);
             setSelectedPatientId(id);
+            setIsTelehealthPatient(patient?.isTelehealthPatient ?? false);
+            setIncludePendingServices(false);
             setAssignedDoctorId(patient?.primaryPhysicianId || '');
             setVisitDepartment(patient?.department || '');
             setPaymentSchemeType(patient?.payMode === 'Insurance'
@@ -608,7 +646,12 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
           }}
           saveExistingPatientToken={saveExistingPatientToken}
           registrationType={registrationType}
-          setRegistrationType={setRegistrationType}
+          setRegistrationType={(type: 'Consultation' | 'Non-Consultation' | 'Technician') => {
+            setRegistrationType(type);
+            if (type !== 'Non-Consultation') setIncludePendingServices(false);
+          }}
+          includePendingServices={includePendingServices}
+          setIncludePendingServices={setIncludePendingServices}
           physioTechnician={physioTechnician}
           setPhysioTechnician={setPhysioTechnician}
           doctors={doctors}
@@ -630,6 +673,8 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
           setVisitInsuranceNetwork={setVisitInsuranceNetwork}
           visitEmergencyPhone={visitEmergencyPhone}
           setVisitEmergencyPhone={setVisitEmergencyPhone}
+          isTelehealthPatient={isTelehealthPatient}
+          setIsTelehealthPatient={setIsTelehealthPatient}
           saving={saving}
         />}
         {registrationTab === 'appointment' && (
@@ -862,11 +907,13 @@ const RegistrationSection: React.FC<{ icon: React.ElementType; title: string; ch
 
 const Field: React.FC<{ label: string; placeholder: string; wide?: boolean }> = ({ label, placeholder, wide }) => <label className={`${wide ? 'sm:col-span-2 lg:col-span-2' : ''} block`}><span className="block text-[10px] font-semibold text-slate-600 mb-1">{label}</span><input placeholder={placeholder} className="w-full rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none" /></label>;
 
-const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatientQuery, filteredPatients, selectedPatientId, setSelectedPatientId, saveExistingPatientToken, registrationType, setRegistrationType, physioTechnician, setPhysioTechnician, doctors, assignedDoctorId, setAssignedDoctorId, visitDepartment, setVisitDepartment, paymentSchemeType, setPaymentSchemeType, paymentDetails, setPaymentDetails, coveragePercent, setCoveragePercent, visitInsuranceProvider, setVisitInsuranceProvider, visitInsurancePolicyNumber, setVisitInsurancePolicyNumber, visitInsuranceNetwork, setVisitInsuranceNetwork, visitEmergencyPhone, setVisitEmergencyPhone, saving }) => {
+const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatientQuery, filteredPatients, selectedPatientId, setSelectedPatientId, saveExistingPatientToken, registrationType, setRegistrationType, includePendingServices, setIncludePendingServices, physioTechnician, setPhysioTechnician, doctors, assignedDoctorId, setAssignedDoctorId, visitDepartment, setVisitDepartment, paymentSchemeType, setPaymentSchemeType, paymentDetails, setPaymentDetails, coveragePercent, setCoveragePercent, visitInsuranceProvider, setVisitInsuranceProvider, visitInsurancePolicyNumber, setVisitInsurancePolicyNumber, visitInsuranceNetwork, setVisitInsuranceNetwork, visitEmergencyPhone, setVisitEmergencyPhone, isTelehealthPatient, setIsTelehealthPatient, saving }) => {
   const departments = Array.from(new Set([
     patient?.department,
     ...doctors.map((doctor: any) => doctor.department),
   ].filter(Boolean))) as string[];
+  const previousVisit = [...(patient?.facilityVisits || [])].sort((first: any, second: any) => second.visitDate.localeCompare(first.visitDate))[0];
+  const pendingServices = (patient?.services || []).filter((service: any) => service.billingStatus !== 'Billed' && service.billingStatus !== 'Cancelled');
 
   if (patient) {
     return (
@@ -886,6 +933,23 @@ const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatient
           </button>
         </header>
 
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-200 bg-cyan-50 p-4">
+          <input
+            type="checkbox"
+            checked={isTelehealthPatient}
+            onChange={(event) => setIsTelehealthPatient(event.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-cyan-400 text-cyan-600 focus:ring-cyan-500"
+          />
+          <span>
+            <span className="flex items-center gap-2 text-sm font-semibold text-cyan-900">
+              <Video className="h-4 w-4" /> Register as telehealth patient
+            </span>
+            <span className="mt-1 block text-xs text-cyan-800">
+              Save this selection with the patient record.
+            </span>
+          </span>
+        </label>
+
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {[
             ['Date of birth', patient.dob],
@@ -902,6 +966,19 @@ const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatient
             </div>
           ))}
         </div>
+
+        <section className="rounded-lg border border-blue-100 bg-blue-50/60 p-3" aria-label="Patient history summary">
+          <h3 className="text-xs font-bold text-blue-950">History on file</h3>
+          <div className="mt-2 grid gap-2 text-[10px] sm:grid-cols-2">
+            <p><strong>Last visit:</strong> {previousVisit ? `${previousVisit.visitDate} · ${previousVisit.visitType}` : 'No previous visit recorded'}</p>
+            <p><strong>Last diagnosis:</strong> {previousVisit?.primaryDiagnosis?.description || 'Not recorded'}</p>
+            <p><strong>Active conditions:</strong> {patient.chronicConditions?.length ? patient.chronicConditions.join(', ') : 'None recorded'}</p>
+            <p><strong>Allergies:</strong> {patient.allergies?.length ? patient.allergies.map((allergy: any) => allergy.allergen).join(', ') : 'None recorded'}</p>
+            <p className="sm:col-span-2"><strong>Active medications:</strong> {patient.medications?.filter((medication: any) => medication.status === 'Active').length
+              ? patient.medications.filter((medication: any) => medication.status === 'Active').map((medication: any) => medication.name).join(', ')
+              : 'None recorded'}</p>
+          </div>
+        </section>
 
         <section className="space-y-3 rounded-lg border border-slate-200 p-3">
           <h3 className="text-xs font-bold text-slate-800">Visit insurance / payment</h3>
@@ -951,6 +1028,21 @@ const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatient
             ))}
           </div>
         </div>
+
+        {registrationType === 'Non-Consultation' && pendingServices.length > 0 && (
+          <section className="rounded-lg border border-rose-200 bg-rose-50 p-3" aria-label="Pending services">
+            <label className="flex cursor-pointer items-start gap-2">
+              <input type="checkbox" checked={includePendingServices} onChange={(event) => setIncludePendingServices(event.target.checked)} className="mt-0.5 accent-rose-700" />
+              <span>
+                <strong className="block text-xs text-rose-900">{pendingServices.length} pending service{pendingServices.length === 1 ? '' : 's'} on file</strong>
+                <span className="mt-0.5 block text-[10px] text-rose-800">Include these services in this non-consultation visit for review.</span>
+              </span>
+            </label>
+            <ul className="mt-2 space-y-1 border-t border-rose-200 pt-2 text-[10px] text-rose-900">
+              {pendingServices.map((service: any) => <li key={service.id} className="flex justify-between gap-2"><span>{service.name}</span><span className="shrink-0 font-semibold">{service.billingStatus || 'Pending'}</span></li>)}
+            </ul>
+          </section>
+        )}
 
         <div className="grid gap-3 sm:grid-cols-2">
           {registrationType !== 'Technician' ? (

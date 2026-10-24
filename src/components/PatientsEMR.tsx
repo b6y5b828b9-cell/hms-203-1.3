@@ -337,6 +337,7 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
       addedAt: new Date().toISOString(),
       addedBy: currentUser.name,
       encounterTokenId: currentVisitToken?.id,
+      billingStatus: 'Pending',
     };
     updatePatient(selectedPatient.id, { services: [...patientServices, service] });
     addNotification('Patient Service Added', `${service.name} added to ${selectedPatient.firstName} ${selectedPatient.lastName}'s record.`, 'info', selectedPatient.id);
@@ -920,14 +921,16 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                     {[...patientServices].reverse().map((service) => {
                       const approval = patientServiceApprovals.find((item) => item.id === service.insuranceApprovalId);
                       return (
-                        <article key={service.id} className="flex flex-col justify-between gap-3 py-3 sm:flex-row sm:items-center">
+                        <article key={service.id} className={`flex flex-col justify-between gap-3 rounded-md border px-3 py-3 sm:flex-row sm:items-center ${service.billingStatus === 'Billed' ? 'border-emerald-100 bg-emerald-50/40' : service.billingStatus === 'Cancelled' ? 'border-slate-200 bg-slate-50' : 'border-rose-200 bg-rose-50/70'}`}>
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <h4 className="text-xs font-bold text-slate-900">{service.name}</h4>
                               <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">{service.category}</span>
+                              <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${service.billingStatus === 'Billed' ? 'bg-emerald-100 text-emerald-800' : service.billingStatus === 'Cancelled' ? 'bg-slate-200 text-slate-700' : 'bg-rose-100 text-rose-800'}`}>{service.billingStatus || 'Pending'}</span>
                               {service.serviceCode && <span className="font-mono text-[10px] text-slate-500">{service.serviceCode}</span>}
                             </div>
                             <p className="mt-1 text-[11px] text-slate-600">Estimated ${service.estimatedCost.toFixed(2)} · Added by {service.addedBy} · {new Date(service.addedAt).toLocaleDateString()}</p>
+                            {service.invoiceId && <p className="mt-1 text-[10px] font-semibold text-emerald-800">Billed on invoice {service.invoiceId}</p>}
                             {approval && (
                               <div className="mt-1 space-y-0.5 text-[10px] text-slate-500">
                                 <p>{approval.approvalNumber || 'Authorization pending'} · {approval.insuranceProvider} · Policy {approval.policyNumber || 'not recorded'}</p>

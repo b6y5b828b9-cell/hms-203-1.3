@@ -139,6 +139,19 @@ export interface PatientService {
   addedBy: string;
   encounterTokenId?: string;
   insuranceApprovalId?: string;
+  billingStatus?: ServiceBillingStatus;
+  invoiceId?: string;
+  deferredAt?: string;
+}
+
+export type ServiceBillingStatus = 'Pending' | 'Billed' | 'Deferred' | 'Cancelled';
+
+export interface EncounterServiceBillingState {
+  serviceId: string;
+  status: ServiceBillingStatus;
+  invoiceId?: string;
+  updatedAt: string;
+  updatedBy: string;
 }
 
 export interface ClinicalNote {
@@ -334,6 +347,9 @@ export interface Patient {
   technicianName?: string;
   visitBillingType?: 'Cosmetic -5%' | 'Treatment 0%';
   payMode?: 'Self' | 'Insurance' | 'Discount Card' | 'Company';
+  discountCardName?: string;
+  discountCardNumber?: string;
+  discountPercent?: number;
   insuranceCardImage?: string;
   supportDocumentImage?: string;
   hasTravelHistory?: boolean;
@@ -509,6 +525,11 @@ export interface BillItem {
   id: string;
   serviceCode?: string;
   cptCode?: string;
+  sourceServiceId?: string;
+  sourceEncounterTokenId?: string;
+  sourceType?: 'Doctor Order' | 'Patient Service' | 'Nursing Service' | 'Manual';
+  insuranceApprovalId?: string;
+  billingStatus?: ServiceBillingStatus;
   description: string;
   category: 'Consultation' | 'Lab Test' | 'Radiology' | 'Pharmacy' | 'Room & Nursing' | 'Surgical Procedure' | 'Technician Service' | 'Cardiology';
   unitCost: number;
@@ -625,13 +646,44 @@ export interface InsuranceApproval {
   approvedAmount: number;
   copayPercentage: number;
   copayAmount: number;
-  approvalStatus: 'Approved' | 'Pending' | 'Query Raised' | 'Rejected';
+  approvalStatus: 'Approved' | 'Pending' | 'Pending Info' | 'Query Raised' | 'Rejected' | 'Waiver Notification Due' | 'Waiver Notified';
   serviceRecordId?: string;
   encounterTokenId?: string;
   approvalDate: string;
   validUntil: string;
   authorisedBy: string;
   remarks?: string;
+  requestType?: 'Elective Outpatient' | 'Elective Inpatient' | 'Emergency';
+  eligibilityClassification?: 'Direct Billing' | 'Pre-Authorization Required' | 'Excluded' | 'Pre-Existing' | 'Mapping Review Required';
+  emiratesId?: string;
+  payerId?: string;
+  facilityDhaLicense?: string;
+  doctorLicense?: string;
+  icd10Code?: string;
+  clinicalRationale?: string;
+  supportingDocuments?: {
+    labReport: boolean;
+    imagingReport: boolean;
+  };
+  requestedAt?: string;
+  slaDueAt?: string;
+  gatewayStatus?: 'Not Connected' | 'Ready for Manual Submission' | 'Submitted' | 'Response Received';
+  emergencyWaiver?: {
+    immediateTreatment: boolean;
+    postStabilizationNotificationDueAt: string;
+    notifiedAt?: string;
+  };
+  rejectionCode?: string;
+  missingFields?: string[];
+  appealDraft?: string;
+  financialBreakdown?: {
+    currency: 'AED';
+    requestedAmount: number;
+    approvedAmount: number;
+    copayPercentage: number;
+    copayAmount: number;
+    patientPayable: number;
+  };
 }
 
 export interface PosTransaction {
@@ -858,7 +910,9 @@ export interface ReceptionToken {
   paymentScheme?: TokenPaymentScheme;
   vitals?: TokenVitalsRecord;
   serviceItems?: TokenServiceItem[];
+  pendingServiceIds?: string[];
   doctorOrders?: TokenDoctorOrder;
+  serviceBillingStates?: EncounterServiceBillingState[];
   billingSummary?: TokenBillingSummary;
   diagnosticReports?: TokenDiagnosticReport[];
   visitDocuments?: EncounterDocumentAttachment[];
@@ -881,9 +935,11 @@ export interface Invoice {
   createdAt?: string; // ISO timestamp string
   dueDate: string;
   items: BillItem[];
+  deferredItems?: BillItem[];
   subtotal: number;
   tax: number;
   totalAmount?: number;
+  discountAmount?: number;
   paidAmount?: number;
   refundedAmount?: number;
   insuranceCoveredAmount: number;

@@ -65,6 +65,7 @@ const HospitalAppContent: React.FC = () => {
 
   // Modal State
   const [isNewPatientOpen, setIsNewPatientOpen] = useState(false);
+  const [newPatientInitialTelehealth, setNewPatientInitialTelehealth] = useState(false);
   const [editingPatientId, setEditingPatientId] = useState<string | undefined>(undefined);
   const [isNewAppointmentOpen, setIsNewAppointmentOpen] = useState(false);
   const [appointmentPreset, setAppointmentPreset] = useState<
@@ -116,7 +117,10 @@ const HospitalAppContent: React.FC = () => {
         }
         return (
           <PatientRegistrationDesk
-            onOpenNewPatient={() => setIsNewPatientOpen(true)}
+            onOpenNewPatient={(isTelehealthPatient = false) => {
+              setNewPatientInitialTelehealth(isTelehealthPatient);
+              setIsNewPatientOpen(true);
+            }}
             onEditPatient={(id) => {
               setEditingPatientId(id);
               setSelectedPatientId(id);
@@ -324,9 +328,11 @@ const HospitalAppContent: React.FC = () => {
       <NewPatientModal
         isOpen={isNewPatientOpen}
         initialPatientId={editingPatientId}
+        initialIsTelehealthPatient={newPatientInitialTelehealth}
         onClose={() => {
           setIsNewPatientOpen(false);
           setEditingPatientId(undefined);
+          setNewPatientInitialTelehealth(false);
         }}
         onPatientCreated={(newId) => {
           setSelectedPatientId(newId);

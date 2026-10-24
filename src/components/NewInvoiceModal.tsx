@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { X, ReceiptText, Plus, Trash2, DollarSign, ShieldCheck, CheckCircle2, Stethoscope } from 'lucide-react';
+import { X, ReceiptText, Plus, Trash2, DollarSign, ShieldCheck, CheckCircle2, Stethoscope, RotateCcw } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { BillItem } from '../types';
 import { PatientLookup } from './billing/PatientLookup';
-import { applyInsuranceBreakdown, parseInsuranceDeductible, sumInvoiceItemField } from '../utils/insuranceInvoice';
+import { applyApprovedInsuranceBreakdown, applyDiscountBreakdown, parseInsuranceDeductible, sumInvoiceItemField } from '../utils/insuranceInvoice';
 
 interface NewInvoiceModalProps {
   isOpen: boolean;
@@ -11,13 +11,14 @@ interface NewInvoiceModalProps {
 }
 
 export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClose }) => {
-  const { patients, receptionTokens, hospitalPriceCatalog, pharmacy, createInvoice, addNotification } = useHospital();
+  const { patients, receptionTokens, insuranceApprovals, hospitalPriceCatalog, pharmacy, createInvoice, addNotification } = useHospital();
 
   const [patientId, setPatientId] = useState('');
   const [encounterType, setEncounterType] = useState<'OPD' | 'IPD'>('OPD');
   const [selectedTokenId, setSelectedTokenId] = useState('');
   const [items, setItems] = useState<BillItem[]>([]);
   const [diagnoses, setDiagnoses] = useState<Array<{ code: string; description: string; doctorName: string; orderedAt: string }>>([]);
+  const [invoiceReviewTab, setInvoiceReviewTab] = useState<'services' | 'approvals'>('services');
   const [insuranceCovered, setInsuranceCovered] = useState(0);
   const [copayAmount, setCopayAmount] = useState(25);
   const [itemDesc, setItemDesc] = useState('');
@@ -27,11 +28,30 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
   const [dueRemarks, setDueRemarks] = useState('');
   const [formError, setFormError] = useState('');
   const selectedPatient = patients.find((patient) => patient.id === patientId);
-  const patientTokens = receptionTokens.filter((token) => token.patientId === patientId && token.doctorOrders);
+  const patientTokens = receptionTokens.filter((token) => token.patientId === patientId && (
+    token.doctorOrders || token.serviceItems?.length || token.pendingServiceIds?.length ||
+    selectedPatient?.services?.some((service) => service.encounterTokenId === token.id)
+  ));
   const selectedToken = patientTokens.find((token) => token.id === selectedTokenId);
-  const isInsuranceInvoice = selectedPatient?.payMode === 'Insurance';
+  const paymentScheme = selectedToken?.paymentScheme;
+  const isInsuranceInvoice = paymentScheme
+    ? paymentScheme.schemeType === 'Insurance'
+    : selectedPatient?.payMode === 'Insurance';
   const deductibleConfigured = selectedPatient?.insurance.deductibleAmount ||
     parseInsuranceDeductible(selectedPatient?.insuranceList?.find((record) => record.isPrimary)?.copayDeductible);
+  const findApprovalForItem = (item: BillItem, tokenId = selectedToken?.id) => insuranceApprovals.find((approval) => {
+    if (approval.patientId !== patientId) return false;
+    if (item.insuranceApprovalId === approval.id) return true;
+    if (item.sourceServiceId && approval.serviceRecordId === item.sourceServiceId) return true;
+    if (!tokenId || approval.encounterTokenId !== tokenId) return false;
+    return Boolean(
+      (item.serviceCode && approval.serviceCode === item.serviceCode) ||
+      approval.serviceName.trim().toLowerCase() === item.description.trim().toLowerCase()
+    );
+  });
+  const patientApprovals = insuranceApprovals.filter((approval) =>
+    approval.patientId === patientId && (!selectedTokenId || !approval.encounterTokenId || approval.encounterTokenId === selectedTokenId)
+  );
 
   useEffect(() => {
     if (!isOpen) return;
@@ -72,13 +92,17 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
       quantity: 1,
       amount: price,
       totalPrice: price,
+      sourceType: 'Manual',
+      billingStatus: 'Pending',
     };
     setItems([...items, newItem]);
     setItemDesc('');
   };
 
   const handleRemoveItem = (id: string) => {
-    setItems(items.filter((i) => i.id !== id));
+    setItems((current) => current.map((item) => item.id === id
+      ? { ...item, billingStatus: item.billingStatus === 'Deferred' ? 'Pending' : 'Deferred' }
+      : item));
   };
 
   const addCatalogItem = (entry: { id: string; code: string; cptCode?: string; name: string; category: BillItem['category']; price: number }) => {
@@ -96,6 +120,8 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
       quantity: 1,
       amount: entry.price,
       totalPrice: entry.price,
+      sourceType: 'Manual',
+      billingStatus: 'Pending',
     }]);
     setCatalogSearch('');
     setFormError('');
@@ -114,13 +140,13 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
     setSelectedTokenId(tokenId);
     const token = patientTokens.find((item) => item.id === tokenId);
     const orders = token?.doctorOrders;
-    if (!token || !orders) {
+    if (!token) {
       setItems([]);
       setDiagnoses([]);
       return;
     }
     const orderedItems: BillItem[] = [
-      ...(orders.consultationFee > 0 ? [{
+      ...(orders && orders.consultationFee > 0 ? [{
         id: `${token.id}-consult`,
         description: `Consultation — ${orders.orderedByDoctorName}`,
         category: 'Consultation' as const,
@@ -129,7 +155,7 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
         amount: orders.consultationFee,
         totalPrice: orders.consultationFee,
       }] : []),
-      ...(orders.medicationRequests || []).map((order) => ({
+      ...(orders?.medicationRequests || []).map((order) => ({
         id: order.id,
         serviceCode: order.sku,
         description: `${order.medicationName} (${order.sku})`,
@@ -139,7 +165,7 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
         amount: order.price,
         totalPrice: order.price,
       })),
-      ...orders.labRequests.filter((order) => order.price > 0).map((order) => ({
+      ...(orders?.labRequests || []).filter((order) => order.price > 0).map((order) => ({
         id: order.id,
         serviceCode: order.id,
         cptCode: order.cptCode,
@@ -150,7 +176,7 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
         amount: order.price,
         totalPrice: order.price,
       })),
-      ...orders.radiologyRequests.filter((order) => order.price > 0).map((order) => ({
+      ...(orders?.radiologyRequests || []).filter((order) => order.price > 0).map((order) => ({
         id: order.id,
         serviceCode: order.id,
         cptCode: order.cptCode,
@@ -161,7 +187,7 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
         amount: order.price,
         totalPrice: order.price,
       })),
-      ...orders.procedureRequests.filter((order) => order.price > 0).map((order) => ({
+      ...(orders?.procedureRequests || []).filter((order) => order.price > 0).map((order) => ({
         id: order.id,
         serviceCode: order.id,
         cptCode: order.cptCode,
@@ -173,30 +199,87 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
         totalPrice: order.price,
       })),
     ];
-    setItems(orderedItems);
-    setDiagnoses(orders.diagnoses.map((diagnosis) => ({
+    const doctorOrderItems = orderedItems.map((item) => {
+      const sourceItem = { ...item, sourceServiceId: item.id, sourceEncounterTokenId: token.id, sourceType: 'Doctor Order' as const };
+      const priorState = token.serviceBillingStates?.find((state) => state.serviceId === item.id);
+      const approval = findApprovalForItem(sourceItem, token.id);
+      return {
+        ...sourceItem,
+        insuranceApprovalId: approval?.id,
+        billingStatus: priorState?.status || 'Pending',
+      };
+    });
+    const patientServiceItems: BillItem[] = (selectedPatient?.services || [])
+      .filter((service) => service.encounterTokenId === token.id || token.pendingServiceIds?.includes(service.id))
+      .map((service) => ({
+        id: service.id,
+        sourceServiceId: service.id,
+        sourceEncounterTokenId: token.id,
+        sourceType: 'Patient Service',
+        insuranceApprovalId: service.insuranceApprovalId,
+        description: service.name,
+        category: service.category === 'Procedure' ? 'Surgical Procedure' : service.category === 'IPD Admission' ? 'Room & Nursing' : service.category,
+        unitCost: service.estimatedCost,
+        quantity: 1,
+        amount: service.estimatedCost,
+        totalPrice: service.estimatedCost,
+        billingStatus: service.billingStatus || 'Pending',
+      }));
+    const nursingItems: BillItem[] = (token.serviceItems || []).map((service) => ({
+      id: service.id,
+      sourceServiceId: service.id,
+      sourceEncounterTokenId: token.id,
+      sourceType: 'Nursing Service',
+      description: service.name,
+      category: service.category === 'Test' ? 'Lab Test' : service.category === 'Procedure' ? 'Surgical Procedure' : 'Technician Service',
+      unitCost: service.price,
+      quantity: 1,
+      amount: service.price,
+      totalPrice: service.price,
+      billingStatus: token.serviceBillingStates?.find((state) => state.serviceId === service.id)?.status || 'Pending',
+    }));
+    setItems([...doctorOrderItems, ...patientServiceItems, ...nursingItems]);
+    setDiagnoses((orders?.diagnoses || []).map((diagnosis) => ({
       code: diagnosis.code,
       description: diagnosis.description,
-      doctorName: orders.orderedByDoctorName,
-      orderedAt: orders.orderedAt,
+      doctorName: orders?.orderedByDoctorName || token.doctorName || 'Attending Physician',
+      orderedAt: orders?.orderedAt || token.visitDate || token.createdDate || '',
     })));
     setFormError('');
   };
 
-  const totalAmount = items.reduce((sum, item) => sum + (Number(item.amount ?? item.totalPrice) || 0), 0);
+  const billableItems = items.filter((item) => !['Billed', 'Deferred', 'Cancelled'].includes(item.billingStatus || 'Pending'));
+  const deferredItems = items.filter((item) => item.billingStatus === 'Deferred');
+  const totalAmount = billableItems.reduce((sum, item) => sum + (Number(item.amount ?? item.totalPrice) || 0), 0);
+  const discountPercent = !isInsuranceInvoice && paymentScheme?.schemeType === 'Discount Card'
+    ? Math.min(100, Math.max(0, Number(paymentScheme.discountPercent) || 0))
+    : 0;
+  const linkedItems = billableItems.map((item) => {
+    const approval = findApprovalForItem(item);
+    return { ...item, insuranceApprovalId: item.insuranceApprovalId || approval?.id };
+  });
   const invoiceItems = isInsuranceInvoice
-    ? applyInsuranceBreakdown(
-        items,
-        selectedPatient?.insurance.serviceCopay,
-        100 - (selectedPatient?.insurance.coveragePercentage ?? 100),
-        deductibleConfigured
-      )
-    : items;
-  const invoiceInsuranceCovered = isInsuranceInvoice ? sumInvoiceItemField(invoiceItems, 'insuranceAmount') : Number(insuranceCovered) || 0;
-  const invoiceCopay = isInsuranceInvoice ? sumInvoiceItemField(invoiceItems, 'copayAmount') : copayAmount;
+    ? applyApprovedInsuranceBreakdown(linkedItems, insuranceApprovals, deductibleConfigured)
+    : discountPercent > 0
+    ? applyDiscountBreakdown(linkedItems, discountPercent)
+    : linkedItems;
+  const invoiceInsuranceCovered = isInsuranceInvoice
+    ? sumInvoiceItemField(invoiceItems, 'insuranceAmount')
+    : discountPercent > 0 ? 0 : Number(insuranceCovered) || 0;
+  const invoiceCopay = isInsuranceInvoice
+    ? sumInvoiceItemField(invoiceItems, 'copayAmount')
+    : discountPercent > 0 ? 0 : copayAmount;
   const invoiceDeductible = isInsuranceInvoice ? sumInvoiceItemField(invoiceItems, 'deductibleAmount') : 0;
+  const invoiceDiscountAmount = sumInvoiceItemField(invoiceItems, 'discountAmount');
+  const invoiceNetAmount = invoiceItems.reduce((sum, item) => sum + Number(item.netAmount ?? item.amount ?? item.totalPrice ?? 0), 0);
+  const hasPendingApproval = isInsuranceInvoice && invoiceItems.some((item) => {
+    const approval = findApprovalForItem(item);
+    return approval && approval.approvalStatus !== 'Approved';
+  });
   const balanceDue = isInsuranceInvoice
-    ? invoiceCopay + invoiceDeductible
+    ? Math.max(0, invoiceNetAmount - invoiceInsuranceCovered)
+    : discountPercent > 0
+    ? Math.max(0, invoiceNetAmount - (Number(insuranceCovered) || 0))
     : Math.max(0, totalAmount - (Number(insuranceCovered) || 0) + copayAmount);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -207,16 +290,20 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
       setFormError('Select a patient before saving the invoice.');
       return;
     }
-    if (items.length === 0) {
+    if (billableItems.length === 0) {
       setFormError('Add at least one charge before saving the invoice.');
       return;
     }
-    if (items.some((item) => !item.description.trim() || !Number.isFinite(item.unitCost) || item.unitCost <= 0 || !Number.isInteger(item.quantity) || item.quantity < 1)) {
+    if (billableItems.some((item) => !item.description.trim() || !Number.isFinite(item.unitCost) || item.unitCost <= 0 || !Number.isInteger(item.quantity) || item.quantity < 1)) {
       setFormError('Each service needs a description, a positive unit price, and a whole-number quantity.');
       return;
     }
     if (!isInsuranceInvoice && (!Number.isFinite(Number(insuranceCovered)) || Number(insuranceCovered) < 0 || Number(insuranceCovered) > totalAmount)) {
       setFormError('Insurance adjudication must be between $0 and the invoice subtotal.');
+      return;
+    }
+    if (discountPercent > 0 && Number(insuranceCovered) > 0) {
+      setFormError('A discount card cannot be combined with insurance coverage on the same invoice.');
       return;
     }
     if (!isInsuranceInvoice && (!Number.isFinite(copayAmount) || copayAmount < 0)) {
@@ -241,8 +328,10 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
       patientEmail: selectedPatient.email,
       issueDate: new Date().toISOString().split('T')[0],
       dueDate: new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
-      status: saveDraft ? 'Draft' : invoiceInsuranceCovered > 0 ? 'Pending Insurance' : balanceDue === 0 ? 'Paid' : 'Pending',
+      status: saveDraft ? 'Draft' : invoiceInsuranceCovered > 0 || hasPendingApproval ? 'Pending Insurance' : balanceDue === 0 ? 'Paid' : 'Pending',
       items: invoiceItems,
+      deferredItems,
+      discountAmount: invoiceDiscountAmount,
       insuranceCoveredAmount: invoiceInsuranceCovered,
       copayAmount: invoiceCopay,
       deductibleAmount: invoiceDeductible,
@@ -350,41 +439,68 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
           <div className="space-y-3 p-3 bg-slate-50 border border-slate-200/80 rounded-xl">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-                2. Itemized Charges ({items.length})
+                2. Invoice Review
               </span>
               <span className="text-xs font-mono font-bold text-slate-700">
                 Subtotal: ${totalAmount.toFixed(2)}
               </span>
             </div>
 
-            <div className="space-y-1.5 max-h-64 overflow-y-auto divide-y divide-slate-100 bg-white p-2.5 rounded-lg border border-slate-200">
-              {!items.length && <p className="py-3 text-center text-[11px] text-slate-500">Select a doctor visit to load ordered services or add a service below.</p>}
+            <div className="flex border-b border-slate-200" role="tablist" aria-label="Invoice review">
+              <button type="button" role="tab" aria-selected={invoiceReviewTab === 'services'} onClick={() => setInvoiceReviewTab('services')} className={`border-b-2 px-3 py-2 text-[10px] font-semibold ${invoiceReviewTab === 'services' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>
+                Services ({items.length})
+              </button>
+              <button type="button" role="tab" aria-selected={invoiceReviewTab === 'approvals'} onClick={() => setInvoiceReviewTab('approvals')} className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-[10px] font-semibold ${invoiceReviewTab === 'approvals' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>
+                <ShieldCheck className="h-3.5 w-3.5" /> Approvals ({patientApprovals.length})
+              </button>
+            </div>
+
+            {invoiceReviewTab === 'services' ? <div className="space-y-1.5 max-h-64 overflow-y-auto divide-y divide-slate-100 bg-white p-2.5 rounded-lg border border-slate-200">
+              {!items.length && <p className="py-3 text-center text-[11px] text-slate-500">Select a visit to load ordered services or add a service below.</p>}
               {items.map((it) => (
-                <div key={it.id} className="grid grid-cols-1 gap-2 pt-2 first:pt-0 sm:grid-cols-[minmax(0,1fr)_125px_65px_100px_auto] sm:items-center">
+                <div key={it.id} className={`grid grid-cols-1 gap-2 rounded-md border p-2 sm:grid-cols-[minmax(0,1fr)_125px_65px_100px_auto] sm:items-center ${it.billingStatus === 'Deferred' || (!it.billingStatus || it.billingStatus === 'Pending') ? 'border-rose-200 bg-rose-50' : it.billingStatus === 'Billed' ? 'border-emerald-100 bg-emerald-50/50' : 'border-slate-200'}`}>
                   <div className="min-w-0">
-                    <input aria-label="Service description" value={it.description} onChange={(event) => updateItem(it.id, { description: event.target.value })} className="w-full rounded border border-slate-200 px-2 py-1 text-xs font-medium text-slate-800" />
-                    <span className="text-[9px] uppercase text-slate-400">{it.category}{it.id.startsWith('ITM-') ? '' : ' · Doctor order'}</span>
+                    <input aria-label="Service description" value={it.description} onChange={(event) => updateItem(it.id, { description: event.target.value })} disabled={it.billingStatus === 'Billed'} className={`w-full rounded border px-2 py-1 text-xs font-medium ${it.billingStatus === 'Deferred' ? 'border-rose-200 text-rose-900' : 'border-slate-200 text-slate-800'}`} />
+                    <span className={`text-[9px] uppercase ${it.billingStatus === 'Deferred' ? 'font-bold text-rose-700' : it.billingStatus === 'Billed' ? 'text-emerald-700' : 'text-slate-400'}`}>
+                      {it.sourceType || it.category}{it.billingStatus === 'Deferred' ? ' · Deferred, not billed' : it.billingStatus === 'Billed' ? ' · Already billed' : it.billingStatus === 'Cancelled' ? ' · Cancelled' : ' · Pending, not billed'}
+                    </span>
                   </div>
-                  <select aria-label="Service category" value={it.category} onChange={(event) => updateItem(it.id, { category: event.target.value as BillItem['category'] })} className="w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-[10px]">
+                  <select aria-label="Service category" value={it.category} onChange={(event) => updateItem(it.id, { category: event.target.value as BillItem['category'] })} disabled={it.billingStatus === 'Billed'} className="w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-[10px]">
                     {(['Consultation', 'Lab Test', 'Radiology', 'Pharmacy', 'Room & Nursing', 'Surgical Procedure', 'Cardiology'] as const).map((category) => <option key={category} value={category}>{category}</option>)}
                   </select>
-                  <label className="text-[9px] text-slate-500">Qty<input aria-label="Service quantity" type="number" min="1" step="1" value={it.quantity} onChange={(event) => updateItem(it.id, { quantity: Number(event.target.value) })} className="mt-0.5 w-full rounded border border-slate-200 px-2 py-1 text-right font-mono text-xs" /></label>
-                  <label className="text-[9px] text-slate-500">Unit price<input aria-label="Service unit price" type="number" min="0.01" step="0.01" value={it.unitCost} onChange={(event) => updateItem(it.id, { unitCost: Number(event.target.value) })} className="mt-0.5 w-full rounded border border-slate-200 px-2 py-1 text-right font-mono text-xs" /></label>
+                  <label className="text-[9px] text-slate-500">Qty<input aria-label="Service quantity" type="number" min="1" step="1" value={it.quantity} onChange={(event) => updateItem(it.id, { quantity: Number(event.target.value) })} disabled={it.billingStatus === 'Billed'} className="mt-0.5 w-full rounded border border-slate-200 px-2 py-1 text-right font-mono text-xs" /></label>
+                  <label className="text-[9px] text-slate-500">Unit price<input aria-label="Service unit price" type="number" min="0.01" step="0.01" value={it.unitCost} onChange={(event) => updateItem(it.id, { unitCost: Number(event.target.value) })} disabled={it.billingStatus === 'Billed'} className="mt-0.5 w-full rounded border border-slate-200 px-2 py-1 text-right font-mono text-xs" /></label>
                   <div className="flex items-center justify-between gap-2 sm:justify-end">
-                    <span className="font-mono font-bold text-slate-900">${(Number(it.totalPrice ?? it.amount) || 0).toFixed(2)}</span>
+                    <span className={`font-mono font-bold ${it.billingStatus === 'Deferred' ? 'text-rose-800 line-through' : 'text-slate-900'}`}>${(Number(it.totalPrice ?? it.amount) || 0).toFixed(2)}</span>
                     <button
                       type="button"
                       onClick={() => handleRemoveItem(it.id)}
-                      className="text-rose-500 hover:text-rose-700 p-1 cursor-pointer transition"
-                      title="Remove service"
-                      aria-label={`Remove ${it.description}`}
+                      disabled={it.billingStatus === 'Billed' || it.billingStatus === 'Cancelled'}
+                      className="p-1 text-rose-600 transition hover:text-rose-800 disabled:cursor-not-allowed disabled:opacity-40"
+                      title={it.billingStatus === 'Deferred' ? 'Restore service to invoice' : 'Defer service'}
+                      aria-label={`${it.billingStatus === 'Deferred' ? 'Restore' : 'Defer'} ${it.description}`}
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      {it.billingStatus === 'Deferred' ? <RotateCcw className="h-3.5 w-3.5" /> : <Trash2 className="w-3.5 h-3.5" />}
                     </button>
                   </div>
                 </div>
               ))}
-            </div>
+            </div> : <div className="max-h-64 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2.5">
+              {!patientApprovals.length && <p className="py-3 text-center text-[11px] text-slate-500">No authorization records for this patient or selected encounter.</p>}
+              {patientApprovals.map((approval) => (
+                <div key={approval.id} className="flex items-start justify-between gap-3 border-b border-slate-100 py-2 last:border-0">
+                  <div className="min-w-0">
+                    <p className="truncate text-[11px] font-semibold text-slate-800">{approval.serviceName}</p>
+                    <p className="mt-0.5 text-[9px] text-slate-500">{approval.approvalNumber} · {approval.insuranceProvider}</p>
+                    {approval.remarks && <p className="mt-0.5 text-[9px] text-slate-500">{approval.remarks}</p>}
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${approval.approvalStatus === 'Approved' ? 'bg-emerald-50 text-emerald-700' : approval.approvalStatus === 'Rejected' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-800'}`}>{approval.approvalStatus}</span>
+                    <p className="mt-1 font-mono text-[10px] text-slate-700">${approval.approvalStatus === 'Approved' ? approval.approvedAmount.toFixed(2) : '0.00'} covered</p>
+                  </div>
+                </div>
+              ))}
+            </div>}
 
             {/* Add service */}
             <div className="p-2 bg-white border border-slate-200 rounded-lg flex flex-wrap gap-2 items-center">
@@ -441,7 +557,7 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
                 readOnly={isInsuranceInvoice}
                 className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs font-mono font-medium focus:ring-2 focus:ring-blue-500 outline-none"
               />
-              {isInsuranceInvoice && <span className="mt-1 block text-[9px] text-slate-500">Calculated from registered insurance service copay settings.</span>}
+              {isInsuranceInvoice && <span className="mt-1 block text-[9px] text-slate-500">Only approved authorization amounts are credited. Pending or rejected services remain patient-payable.</span>}
             </div>
             <label className="text-[10px] font-semibold text-slate-600">
               Patient copay ($)
@@ -450,6 +566,16 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
             {isInsuranceInvoice && (
               <div className="col-span-2 flex justify-between text-[10px] text-slate-600">
                 <span>Patient deductible</span><span className="font-mono">${invoiceDeductible.toFixed(2)}</span>
+              </div>
+            )}
+            {invoiceDiscountAmount > 0 && (
+              <div className="col-span-2 flex justify-between text-[10px] text-emerald-700">
+                <span>Discount ({discountPercent}%)</span><span className="font-mono">−${invoiceDiscountAmount.toFixed(2)}</span>
+              </div>
+            )}
+            {isInsuranceInvoice && hasPendingApproval && (
+              <div className="col-span-2 rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] text-amber-900">
+                Authorization is pending review. No pending amount has been deducted from the patient balance.
               </div>
             )}
             <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-3 text-right">

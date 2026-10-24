@@ -1344,7 +1344,12 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             preAuthStatus: newPatient.insurance.requiresPreAuthorization ? 'Pending' : 'Not Required',
           }
         : newPatient.payMode === 'Discount Card'
-          ? { schemeType: 'Discount Card' }
+          ? {
+              schemeType: 'Discount Card',
+              discountCardName: newPatient.discountCardName,
+              discountCardNumber: newPatient.discountCardNumber,
+              discountPercent: newPatient.discountPercent,
+            }
           : { schemeType: 'Self-Pay' },
       visitDate: nowDate,
       patientVisitSummary: registrationType === 'Consultation'
@@ -1908,6 +1913,49 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     updateAppointmentStatus(nextPatient.id, 'In Consultation');
   };
 
+  const applyInvoiceServiceDispositions = (invoice: Invoice) => {
+    if (invoice.status === 'Draft') return;
+    const dispositionByServiceId = new Map<string, 'Billed' | 'Deferred'>();
+    invoice.items.forEach((item) => {
+      if (item.sourceServiceId) dispositionByServiceId.set(item.sourceServiceId, 'Billed');
+    });
+    (invoice.deferredItems || []).forEach((item) => {
+      if (item.sourceServiceId) dispositionByServiceId.set(item.sourceServiceId, 'Deferred');
+    });
+    if (!dispositionByServiceId.size) return;
+
+    const updatedAt = new Date().toISOString();
+    setPatients((prev) => prev.map((patient) => patient.id !== invoice.patientId ? patient : {
+      ...patient,
+      services: patient.services?.map((service) => {
+        const status = dispositionByServiceId.get(service.id);
+        return status ? {
+          ...service,
+          billingStatus: status,
+          invoiceId: status === 'Billed' ? invoice.id : undefined,
+          deferredAt: status === 'Deferred' ? updatedAt : undefined,
+        } : service;
+      }),
+      updatedAt,
+    }));
+
+    if (invoice.encounterTokenId) {
+      setReceptionTokens((prev) => prev.map((token) => {
+        if (token.id !== invoice.encounterTokenId) return token;
+        const existingStates = token.serviceBillingStates || [];
+        const nextStates = [...existingStates.filter((state) => !dispositionByServiceId.has(state.serviceId))];
+        dispositionByServiceId.forEach((status, serviceId) => nextStates.push({
+          serviceId,
+          status,
+          invoiceId: status === 'Billed' ? invoice.id : undefined,
+          updatedAt,
+          updatedBy: currentUser.name,
+        }));
+        return { ...token, serviceBillingStates: nextStates };
+      }));
+    }
+  };
+
   const createInvoice = (
     invData: Omit<Invoice, 'id' | 'subtotal' | 'patientPayable' | 'amountPaid' | 'balanceDue' | 'transactions'>
   ): Invoice => {
@@ -1917,12 +1965,15 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       0
     );
     const hasInsuranceBreakdown = invData.items.some((item) => item.insuranceAmount !== undefined);
-    const netTotal = hasInsuranceBreakdown ? sumInvoiceItemField(invData.items, 'netAmount') : subtotal;
+    const netTotal = invData.items.reduce(
+      (sum, item) => sum + (Number(item.netAmount ?? item.amount ?? item.totalPrice) || 0),
+      0
+    );
     const insuranceCovered = Number(invData.insuranceCoveredAmount ?? invData.insuranceCovered) || 0;
     const copay = Number(invData.copayAmount) || 0;
     const patientPayable = hasInsuranceBreakdown
       ? Math.max(0, netTotal - insuranceCovered)
-      : Math.max(0, subtotal - insuranceCovered + copay);
+      : Math.max(0, netTotal - insuranceCovered + copay);
     const sanitizedItems: BillItem[] = invData.items.map((it) => {
       const amt = Number(it.amount ?? it.totalPrice) || 0;
       return {
@@ -1944,6 +1995,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       subtotal,
       tax: 0,
       totalAmount: netTotal,
+      discountAmount: Number(invData.discountAmount) || sumInvoiceItemField(invData.items, 'discountAmount'),
       paidAmount: 0,
       insuranceCoveredAmount: insuranceCovered,
       insuranceCovered,
@@ -1958,6 +2010,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       transactions: [],
     };
     setInvoices((prev) => [newInvoice, ...prev]);
+    applyInvoiceServiceDispositions(newInvoice);
     const primaryDiagnosis = newInvoice.diagnoses?.[0];
     appendPatientVisit(newInvoice.patientId, {
       visitDate: newInvoice.issueDate,
@@ -2005,7 +2058,10 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       );
       return;
     }
-    const status: Invoice['status'] = invoice.insuranceCoveredAmount > 0
+    const hasPendingAuthorization = invoice.items.some((item) => insuranceApprovals.some((approval) =>
+      approval.id === item.insuranceApprovalId && approval.approvalStatus !== 'Approved'
+    ));
+    const status: Invoice['status'] = invoice.insuranceCoveredAmount > 0 || hasPendingAuthorization
       ? 'Pending Insurance'
       : invoice.balanceDue <= 0
       ? 'Paid'
@@ -2020,6 +2076,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       dueRecordedBy: item.balanceDue > 0 ? currentUser.name : undefined,
       dueRemarks: item.balanceDue > 0 ? item.dueRemarks?.trim() : undefined,
     } : item));
+    applyInvoiceServiceDispositions({ ...invoice, status });
     logAuditEvent('UPDATE', 'Billing Invoice', invoiceId, `Invoice issued by ${currentUser.name}. Status set to ${status}.`, 'PCI-DSS Payment Log');
     addNotification('Invoice Issued', `Invoice ${invoiceId} is now available for settlement.`, 'success', invoiceId);
   };

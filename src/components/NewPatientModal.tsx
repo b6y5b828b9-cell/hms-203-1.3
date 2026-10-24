@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   CreditCard,
   FileText,
+  Video,
 } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { BloodGroup, PatientStatus, Patient, PaymentSchemeType } from '../types';
@@ -25,6 +26,7 @@ interface NewPatientModalProps {
   onClose: () => void;
   onPatientCreated?: (id: string) => void;
   initialPatientId?: string;
+  initialIsTelehealthPatient?: boolean;
 }
 
 type RegistrationSection = 'demographics' | 'contact' | 'clinical' | 'insurance';
@@ -52,6 +54,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
   onClose,
   onPatientCreated,
   initialPatientId,
+  initialIsTelehealthPatient = false,
 }) => {
   const { patients, doctors, wardBeds, addPatient, updatePatient, addNotification } = useHospital();
   const [registrationView, setRegistrationView] = useState<RegistrationView>('registration');
@@ -97,6 +100,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
 
   // Clinical & Admission
   const [status, setStatus] = useState<PatientStatus>('Outpatient');
+  const [isTelehealthPatient, setIsTelehealthPatient] = useState(false);
   const [department, setDepartment] = useState('General Medicine');
   const [doctorId, setDoctorId] = useState(doctors[0]?.id || '');
   const [wardOrRoom, setWardOrRoom] = useState('');
@@ -200,6 +204,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
     setConsentSignerRelationship('');
     setRegistrationView('registration');
     setStatus('Outpatient');
+    setIsTelehealthPatient(false);
     setDepartment('General Medicine');
     setDoctorId(doctors[0]?.id || '');
     setWardOrRoom('');
@@ -290,6 +295,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
         setConsentSignerRole('Patient');
         setConsentSignerRelationship('');
         setStatus(existing.status || 'Outpatient');
+        setIsTelehealthPatient(existing.isTelehealthPatient ?? false);
         setDepartment(existing.department || 'General Medicine');
         setDoctorId(existing.primaryPhysicianId || doctors[0]?.id || '');
         setWardOrRoom(existing.wardOrRoom || '');
@@ -337,6 +343,10 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
+
+  useEffect(() => {
+    if (isOpen && !initialPatientId) setIsTelehealthPatient(initialIsTelehealthPatient);
+  }, [isOpen, initialPatientId, initialIsTelehealthPatient]);
 
   if (!isOpen) return null;
 
@@ -485,6 +495,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
           phone: emergencyPhone.trim(),
         },
         status,
+        isTelehealthPatient,
         department,
         primaryPhysicianId: assignedDoctor?.id || 'DOC-01',
         primaryPhysicianName: assignedDoctor?.name || 'Attending Physician',
@@ -589,6 +600,7 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
         phone: emergencyPhone.trim(),
       },
       status,
+      isTelehealthPatient,
       department,
       primaryPhysicianId: assignedDoctor?.id || 'DOC-01',
       primaryPhysicianName: assignedDoctor?.name || 'Attending Physician',
@@ -636,6 +648,9 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
       insuranceCardImage: insuranceCardImage || undefined,
       supportDocumentImage: supportDocumentImage || undefined,
       payMode: payMode === 'Discount Card' ? 'Discount Card' : payMode,
+      discountCardName: payMode === 'Discount Card' ? discountCardName.trim() : undefined,
+      discountCardNumber: payMode === 'Discount Card' ? discountCardName.trim() : undefined,
+      discountPercent: payMode === 'Discount Card' ? Math.min(100, Math.max(0, Number(discountPercent) || 0)) : undefined,
     }, registrationType);
     if (!printReceptionToken(registrationToken)) {
       addNotification('Print Window Blocked', `Patient registered with reception token ${registrationToken.tokenNumber}. Allow pop-ups to print the token slip.`, 'warning', newPatient.id);
@@ -768,6 +783,22 @@ export const NewPatientModal: React.FC<NewPatientModalProps> = ({
 
           {registrationView === 'registration' ? (
             <>
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-200 bg-cyan-50 p-4">
+            <input
+              type="checkbox"
+              checked={isTelehealthPatient}
+              onChange={(event) => setIsTelehealthPatient(event.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-cyan-400 text-cyan-600 focus:ring-cyan-500"
+            />
+            <span>
+              <span className="flex items-center gap-2 text-sm font-semibold text-cyan-900">
+                <Video className="h-4 w-4" /> Register as telehealth patient
+              </span>
+              <span className="mt-1 block text-xs text-cyan-800">
+                Mark this patient for telehealth care.
+              </span>
+            </span>
+          </label>
           <div className="space-y-4 rounded-xl border border-slate-200 p-4">
             <div>
               <h3 className="text-sm font-bold text-slate-900">Patient Information</h3>
