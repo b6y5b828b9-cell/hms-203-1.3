@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { PharmacyItem, PharmacyDispenseRecord, Medication } from '../types';
+import { getEffectiveLineItemStatus } from '../utils/tokenStateMachine';
 
 interface PatientPrescriptionOrder {
   prescriptionId: string;
@@ -39,6 +40,9 @@ interface PatientPrescriptionOrder {
   prescribedBy: string;
   prescribedDate: string;
   status: 'Active' | 'Completed' | 'Discontinued';
+  tokenId?: string;
+  authorizationStatus?: string;
+  authorizedForDispensing?: boolean;
 }
 
 export const PharmacyInventory: React.FC = () => {
@@ -95,6 +99,13 @@ export const PharmacyInventory: React.FC = () => {
       // Check medications
       const meds = patient.prescriptions && patient.prescriptions.length > 0 ? patient.prescriptions : patient.medications || [];
       meds.forEach((m) => {
+        const encounterToken = m.encounterTokenId
+          ? receptionTokens.find((token) => token.id === m.encounterTokenId && token.patientId === patient.id)
+          : undefined;
+        const lineItem = encounterToken?.lineItems?.find((item) => item.id === m.id);
+        const effectiveStatus = encounterToken
+          ? lineItem ? getEffectiveLineItemStatus(lineItem) : 'Pending_Auth'
+          : undefined;
         list.push({
           prescriptionId: m.id,
           patientId: patient.id,
@@ -112,12 +123,53 @@ export const PharmacyInventory: React.FC = () => {
           prescribedBy: m.prescribedBy || 'Attending Physician',
           prescribedDate: m.startDate || 'Recent',
           status: m.status || 'Active',
+          tokenId: encounterToken?.id,
+          authorizationStatus: effectiveStatus,
+          authorizedForDispensing: effectiveStatus === undefined || effectiveStatus === 'Approved' || effectiveStatus === 'Self_Pay',
         });
       });
     });
 
+    receptionTokens.forEach((token) => {
+      const patient = patients.find((item) => item.id === token.patientId);
+      if (!patient) return;
+      const allergies = patient.allergies.map((allergy) =>
+        typeof allergy === 'string' ? allergy : `${allergy.allergen} (${allergy.severity})`
+      );
+      (token.doctorOrders?.medicationRequests || []).forEach((medication) => {
+        const existingOrderIndex = list.findIndex((order) =>
+          order.prescriptionId === medication.id && order.patientId === patient.id
+        );
+        const lineItem = token.lineItems?.find((item) => item.id === medication.id);
+        const effectiveStatus = lineItem ? getEffectiveLineItemStatus(lineItem) : 'Pending_Auth';
+        const tokenOrder: PatientPrescriptionOrder = {
+          prescriptionId: medication.id,
+          patientId: patient.id,
+          patientName: `${patient.firstName} ${patient.lastName}`,
+          patientMrn: patient.rgNo || patient.id,
+          patientAge: patient.age,
+          patientGender: patient.gender,
+          patientAllergies: allergies,
+          medicationName: medication.medicationName,
+          dosage: 'As prescribed',
+          frequency: `${medication.quantity} unit(s)`,
+          route: 'As prescribed',
+          prescribedBy: token.doctorOrders?.orderedByDoctorName || token.doctorName || 'Attending Physician',
+          prescribedDate: token.doctorOrders?.orderedAt || token.visitDate || token.createdDate || 'Recent',
+          status: lineItem?.fulfillmentStatus === 'Dispensed' ? 'Completed' : 'Active',
+          tokenId: token.id,
+          authorizationStatus: effectiveStatus,
+          authorizedForDispensing: effectiveStatus === 'Approved' || effectiveStatus === 'Self_Pay',
+        };
+        if (existingOrderIndex >= 0) {
+          list[existingOrderIndex] = { ...list[existingOrderIndex], ...tokenOrder };
+        } else {
+          list.push(tokenOrder);
+        }
+      });
+    });
     return list;
-  }, [patients]);
+  }, [patients, receptionTokens]);
 
   const activePrescriptions = useMemo(() => {
     return prescriptionOrders.filter((po) => po.status === 'Active');
@@ -189,7 +241,8 @@ export const PharmacyInventory: React.FC = () => {
       dispenseOrder.patientId,
       dispenseQuantity,
       currentUser.name,
-      overrideAllergyWarning
+      overrideAllergyWarning,
+      dispenseOrder.tokenId
     );
 
     if (!res.success) {
@@ -395,6 +448,11 @@ export const PharmacyInventory: React.FC = () => {
                           </td>
                           <td className="py-2.5 px-3 whitespace-nowrap font-bold text-slate-900">
                             {order.medicationName}
+                            {order.tokenId && (
+                              <div className={`text-[10px] font-semibold ${order.authorizedForDispensing ? 'text-emerald-700' : 'text-amber-700'}`}>
+                                Token authorization: {order.authorizationStatus}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2.5 px-3 whitespace-nowrap text-slate-700">
                             <div>{order.dosage}</div>
@@ -427,8 +485,11 @@ export const PharmacyInventory: React.FC = () => {
                           <td className="py-2.5 px-3 whitespace-nowrap text-right">
                             <button
                               onClick={() => handleOpenDispense(order)}
+                              disabled={order.tokenId !== undefined && !order.authorizedForDispensing}
                               className={`px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition cursor-pointer ${
-                                warning
+                                order.tokenId !== undefined && !order.authorizedForDispensing
+                                  ? 'bg-slate-300 text-slate-600 cursor-not-allowed'
+                                  : warning
                                   ? 'bg-rose-600 hover:bg-rose-500 text-white'
                                   : 'bg-emerald-600 hover:bg-emerald-500 text-white'
                               }`}

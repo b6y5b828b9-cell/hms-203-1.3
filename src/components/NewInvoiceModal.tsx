@@ -4,6 +4,13 @@ import { useHospital } from '../context/HospitalContext';
 import { BillItem } from '../types';
 import { PatientLookup } from './billing/PatientLookup';
 import { applyApprovedInsuranceBreakdown, applyDiscountBreakdown, parseInsuranceDeductible, sumInvoiceItemField } from '../utils/insuranceInvoice';
+import {
+  aggregateTokenLineItemBilling,
+  appendTokenLineItems,
+  createDoctorOrderLineItems,
+  createServiceLineItems,
+  getTokenLineItemBillingBreakdown,
+} from '../utils/tokenStateMachine';
 
 interface NewInvoiceModalProps {
   isOpen: boolean;
@@ -33,6 +40,12 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
     selectedPatient?.services?.some((service) => service.encounterTokenId === token.id)
   ));
   const selectedToken = patientTokens.find((token) => token.id === selectedTokenId);
+  const tokenLineItems = selectedToken
+    ? selectedToken.lineItems?.length ? selectedToken.lineItems : appendTokenLineItems(
+        createServiceLineItems(selectedToken, selectedToken.serviceItems || []),
+        selectedToken.doctorOrders ? createDoctorOrderLineItems(selectedToken, selectedToken.doctorOrders) : []
+      )
+      : [];
   const paymentScheme = selectedToken?.paymentScheme;
   const isInsuranceInvoice = paymentScheme
     ? paymentScheme.schemeType === 'Insurance'
@@ -249,6 +262,11 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
   };
 
   const billableItems = items.filter((item) => !['Billed', 'Deferred', 'Cancelled'].includes(item.billingStatus || 'Pending'));
+  const tokenBillingTotals = selectedToken
+    ? aggregateTokenLineItemBilling(tokenLineItems.filter((lineItem) =>
+        billableItems.some((item) => lineItem.id === (item.sourceServiceId || item.id))
+      ))
+    : undefined;
   const deferredItems = items.filter((item) => item.billingStatus === 'Deferred');
   const totalAmount = billableItems.reduce((sum, item) => sum + (Number(item.amount ?? item.totalPrice) || 0), 0);
   const discountPercent = !isInsuranceInvoice && paymentScheme?.schemeType === 'Discount Card'
@@ -258,25 +276,52 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
     const approval = findApprovalForItem(item);
     return { ...item, insuranceApprovalId: item.insuranceApprovalId || approval?.id };
   });
-  const invoiceItems = isInsuranceInvoice
+  const tokenLinkedItems = selectedToken
+    ? linkedItems.map((item) => {
+        const lineItem = tokenLineItems.find((line) => line.id === (item.sourceServiceId || item.id));
+        if (!lineItem) return item;
+        const breakdown = getTokenLineItemBillingBreakdown(lineItem);
+        return {
+          ...item,
+          amount: breakdown.total,
+          totalPrice: breakdown.total,
+          netAmount: breakdown.total,
+          discountAmount: 0,
+          insuranceAmount: breakdown.insuranceCoveredAmount,
+          copayAmount: breakdown.copayAmount,
+        };
+      })
+    : linkedItems;
+  const invoiceItems = selectedToken
+    ? tokenLinkedItems
+    : isInsuranceInvoice
     ? applyApprovedInsuranceBreakdown(linkedItems, insuranceApprovals, deductibleConfigured)
     : discountPercent > 0
     ? applyDiscountBreakdown(linkedItems, discountPercent)
     : linkedItems;
-  const invoiceInsuranceCovered = isInsuranceInvoice
+  const invoiceInsuranceCovered = tokenBillingTotals
+    ? tokenBillingTotals.insuranceCoveredAmount
+    : isInsuranceInvoice
     ? sumInvoiceItemField(invoiceItems, 'insuranceAmount')
     : discountPercent > 0 ? 0 : Number(insuranceCovered) || 0;
-  const invoiceCopay = isInsuranceInvoice
+  const invoiceCopay = tokenBillingTotals
+    ? tokenBillingTotals.copayAmount
+    : isInsuranceInvoice
     ? sumInvoiceItemField(invoiceItems, 'copayAmount')
     : discountPercent > 0 ? 0 : copayAmount;
   const invoiceDeductible = isInsuranceInvoice ? sumInvoiceItemField(invoiceItems, 'deductibleAmount') : 0;
   const invoiceDiscountAmount = sumInvoiceItemField(invoiceItems, 'discountAmount');
-  const invoiceNetAmount = invoiceItems.reduce((sum, item) => sum + Number(item.netAmount ?? item.amount ?? item.totalPrice ?? 0), 0);
-  const hasPendingApproval = isInsuranceInvoice && invoiceItems.some((item) => {
-    const approval = findApprovalForItem(item);
-    return approval && approval.approvalStatus !== 'Approved';
-  });
-  const balanceDue = isInsuranceInvoice
+  const invoiceNetAmount = tokenBillingTotals?.subtotal ??
+    invoiceItems.reduce((sum, item) => sum + Number(item.netAmount ?? item.amount ?? item.totalPrice ?? 0), 0);
+  const hasPendingApproval = selectedToken
+    ? Boolean(tokenBillingTotals?.pendingItemIds.length)
+    : isInsuranceInvoice && invoiceItems.some((item) => {
+        const approval = findApprovalForItem(item);
+        return approval && approval.approvalStatus !== 'Approved';
+      });
+  const balanceDue = tokenBillingTotals
+    ? tokenBillingTotals.patientShare
+    : isInsuranceInvoice
     ? Math.max(0, invoiceNetAmount - invoiceInsuranceCovered)
     : discountPercent > 0
     ? Math.max(0, invoiceNetAmount - (Number(insuranceCovered) || 0))
@@ -312,12 +357,23 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
     }
     const submitter = (e.nativeEvent as SubmitEvent).submitter;
     const saveDraft = submitter instanceof HTMLButtonElement && submitter.value === 'draft';
+    const unmatchedTokenItems = selectedToken && billableItems.some((item) =>
+      !tokenLineItems.some((lineItem) => lineItem.id === (item.sourceServiceId || item.id))
+    );
+    if (unmatchedTokenItems) {
+      setFormError('Every charge on a token-linked invoice must exist as a line item on that visit token.');
+      return;
+    }
+    if (!saveDraft && tokenBillingTotals?.pendingItemIds.length) {
+      setFormError(`Resolve authorization for ${tokenBillingTotals.pendingItemIds.join(', ')} before issuing this invoice.`);
+      return;
+    }
     if (!saveDraft && balanceDue > 0 && !dueRemarks.trim()) {
       setFormError('Add a remark explaining the patient balance before issuing the invoice.');
       return;
     }
 
-    createInvoice({
+    const createdInvoice = createInvoice({
       patientId: selectedPatient.id,
       patientName: `${selectedPatient.firstName} ${selectedPatient.lastName}`,
       encounterType,
@@ -338,6 +394,10 @@ export const NewInvoiceModal: React.FC<NewInvoiceModalProps> = ({ isOpen, onClos
       dueRemarks: dueRemarks.trim() || undefined,
       tax: 0,
     });
+    if (!createdInvoice) {
+      setFormError('The invoice could not be created. Check token authorization and line-item details.');
+      return;
+    }
 
     addNotification(
       saveDraft ? 'Invoice Draft Saved' : 'Invoice Issued',

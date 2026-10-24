@@ -26,6 +26,15 @@ import { PatientDashboard } from './PatientDashboard';
 import { PatientDiagnosticReportsView } from './reports/PatientDiagnosticReportsView';
 import { TokenWorkflowModal } from './tokens/TokenWorkflowModal';
 import { PatientAvatar } from './PatientAvatar';
+import {
+  classifyInsuranceEligibility,
+  createInsuranceAppealDraft,
+  extractRejectionCode,
+  getInsuranceRequestDueAt,
+  getRejectionMissingFields,
+  loadInsuranceCodeMappings,
+  validateInsuranceRequestPayload,
+} from '../utils/insuranceAuthorization';
 
 interface PatientsEMRProps {
   onOpenTriageModal: (patientId: string) => void;
@@ -46,10 +55,13 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
     updatePatient,
     addClinicalNote,
     addPrescription,
+    addTokenLineItem,
     addEncounterDocument,
     addNotification,
     insuranceApprovals,
     addInsuranceApproval,
+    recordEmergencyStabilization,
+    saveInsuranceAppealDraft,
     currentUser,
     currentRole,
   } = useHospital();
@@ -61,6 +73,8 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   const [selectedEncounterTokenId, setSelectedEncounterTokenId] = useState<string | null>(null);
   const [selectedHistoryTokenId, setSelectedHistoryTokenId] = useState<string | null>(null);
   const [historicalEmrTab, setHistoricalEmrTab] = useState<'doctor' | 'nurse' | 'lab' | 'erx' | 'medical' | 'documents'>('doctor');
+  const [stabilizationTimes, setStabilizationTimes] = useState<Record<string, string>>({});
+  const [appealDrafts, setAppealDrafts] = useState<Record<string, string>>({});
 
   // New Note Form State
   const [chiefComplaint, setChiefComplaint] = useState('');
@@ -85,6 +99,13 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   const [serviceCategory, setServiceCategory] = useState<InsuranceApproval['serviceCategory']>('Procedure');
   const [serviceCode, setServiceCode] = useState('');
   const [serviceCost, setServiceCost] = useState('');
+  const [serviceIcd10Code, setServiceIcd10Code] = useState('');
+  const [servicePayerId, setServicePayerId] = useState('');
+  const [serviceFacilityDhaLicense, setServiceFacilityDhaLicense] = useState(import.meta.env.VITE_FACILITY_DHA_LICENSE || '');
+  const [serviceRequestType, setServiceRequestType] = useState<NonNullable<InsuranceApproval['requestType']>>('Elective Outpatient');
+  const [serviceClinicalRationale, setServiceClinicalRationale] = useState('');
+  const [serviceIsExcluded, setServiceIsExcluded] = useState(false);
+  const [serviceIsPreExisting, setServiceIsPreExisting] = useState(false);
 
   const normalizeClinicianName = (name: string) =>
     name.toLowerCase().replace(/^dr\.?\s*/, '').replace(/,?\s*(md|facs|do|phd)\b/g, '').replace(/[.,]/g, '').trim();
@@ -227,7 +248,7 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   const canViewPatientBilling = currentRole === 'admin' || currentRole === 'receptionist';
   const patientServiceApprovals = insuranceApprovals.filter((approval) => approval.patientId === selectedPatient?.id);
   const pendingServiceApprovalCount = patientServiceApprovals.filter(
-    (approval) => approval.approvalStatus === 'Pending' || approval.approvalStatus === 'Query Raised'
+    (approval) => ['Pending', 'Pending Info', 'Query Raised', 'Waiver Notification Due'].includes(approval.approvalStatus)
   ).length;
   const approvedServiceApprovalCount = patientServiceApprovals.filter(
     (approval) => approval.approvalStatus === 'Approved'
@@ -328,11 +349,26 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   const handleAddService = (event: React.FormEvent) => {
     event.preventDefault();
     if (!selectedPatient || !serviceName.trim() || Number(serviceCost) <= 0) return;
+    const eligibilityClassification = classifyInsuranceEligibility({
+      payerId: servicePayerId,
+      cptCode: serviceCode,
+      icd10Code: serviceIcd10Code,
+      isExcluded: serviceIsExcluded,
+      isPreExisting: serviceIsPreExisting,
+    }, loadInsuranceCodeMappings());
     const service: PatientService = {
       id: `SRV-${Date.now()}`,
       name: serviceName.trim(),
       category: serviceCategory,
       serviceCode: serviceCode.trim() || undefined,
+      icd10Code: serviceIcd10Code.trim() || undefined,
+      payerId: servicePayerId.trim() || undefined,
+      facilityDhaLicense: serviceFacilityDhaLicense.trim() || undefined,
+      requestType: serviceRequestType,
+      clinicalRationale: serviceClinicalRationale.trim() || undefined,
+      eligibilityClassification,
+      isExcluded: serviceIsExcluded,
+      isPreExisting: serviceIsPreExisting,
       estimatedCost: Number(serviceCost),
       addedAt: new Date().toISOString(),
       addedBy: currentUser.name,
@@ -340,16 +376,113 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
       billingStatus: 'Pending',
     };
     updatePatient(selectedPatient.id, { services: [...patientServices, service] });
+    if (service.encounterTokenId) {
+      addTokenLineItem(service.encounterTokenId, {
+        id: service.id,
+        kind: service.category === 'Lab Test'
+          ? 'Lab'
+          : service.category === 'Radiology'
+            ? 'Radiology'
+            : service.category === 'Procedure'
+              ? 'Procedure'
+              : 'Service',
+        name: service.name,
+        department: service.category === 'Lab Test'
+          ? 'Laboratory'
+          : service.category === 'Radiology'
+            ? 'Radiology'
+            : currentUser.department,
+        code: service.serviceCode,
+        quantity: 1,
+        unitPrice: service.estimatedCost,
+        totalPrice: service.estimatedCost,
+        orderedBy: service.addedBy,
+        orderedAt: service.addedAt,
+      });
+    }
     addNotification('Patient Service Added', `${service.name} added to ${selectedPatient.firstName} ${selectedPatient.lastName}'s record.`, 'info', selectedPatient.id);
     setServiceName('');
     setServiceCode('');
     setServiceCost('');
+    setServiceIcd10Code('');
+    setServicePayerId('');
+    setServiceClinicalRationale('');
+    setServiceIsExcluded(false);
+    setServiceIsPreExisting(false);
   };
 
   const handleRequestServiceAuthorization = (service: PatientService) => {
     const existingApproval = insuranceApprovals.find((approval) => approval.id === service.insuranceApprovalId);
     if (!selectedPatient || (existingApproval && existingApproval.approvalStatus !== 'Rejected')) return;
-    const requestDate = new Date().toISOString().slice(0, 10);
+    const requestedAt = new Date();
+    const requestDate = requestedAt.toISOString().slice(0, 10);
+    const payerId = service.payerId || '';
+    const facilityDhaLicense = service.facilityDhaLicense || '';
+    const doctorLicense = currentUser.licenseNumber || '';
+    const eligibilityClassification = classifyInsuranceEligibility({
+      payerId,
+      cptCode: service.serviceCode || '',
+      icd10Code: service.icd10Code || '',
+      isExcluded: Boolean(service.isExcluded),
+      isPreExisting: Boolean(service.isPreExisting),
+    }, loadInsuranceCodeMappings());
+    if (eligibilityClassification === 'Excluded' || eligibilityClassification === 'Pre-Existing') {
+      addNotification(
+        'Authorization Request Not Submitted',
+        `Rule engine classified this item as ${eligibilityClassification}. Verify the payer rule and route for authorized review.`,
+        'warning',
+        selectedPatient.id
+      );
+      return;
+    }
+    if (eligibilityClassification === 'Direct Billing') {
+      addNotification(
+        'Pre-Authorization Not Required',
+        'The configured payer mapping classifies this item for direct billing. Confirm benefits and patient responsibility before billing.',
+        'info',
+        selectedPatient.id
+      );
+      return;
+    }
+    const payloadBase = {
+      emiratesId: selectedPatient.emiratesId,
+      payerId,
+      facilityDhaLicense,
+      doctorLicense,
+      icd10Code: service.icd10Code,
+      serviceCode: service.serviceCode,
+      estimatedCost: service.estimatedCost,
+    };
+    const requestType = service.requestType || (selectedPatient.status === 'Inpatient' ? 'Elective Inpatient' : 'Elective Outpatient');
+    const isEmergency = requestType === 'Emergency';
+    const requiredPayloadFields = validateInsuranceRequestPayload(payloadBase);
+    const missingFields = [...requiredPayloadFields];
+    if (!service.clinicalRationale?.trim()) missingFields.push('Clinical rationale');
+    const labReport = selectedPatient.labResults.some((report) => report.category !== 'Radiology');
+    const imagingReport = selectedPatient.labResults.some((report) => report.category === 'Radiology');
+    if (service.category === 'Lab Test' && !labReport) missingFields.push('Relevant laboratory report');
+    if (service.category === 'Radiology' && !imagingReport) missingFields.push('Relevant imaging report');
+    if (!service.clinicalRationale?.trim()) requiredPayloadFields.push('Clinical rationale');
+    if (requiredPayloadFields.length && !isEmergency) {
+      addNotification(
+        'Authorization Request Incomplete',
+        `Complete required request data before submission: ${[...new Set(requiredPayloadFields)].join(', ')}.`,
+        'warning',
+        selectedPatient.id
+      );
+      return;
+    }
+    if (eligibilityClassification === 'Mapping Review Required') {
+      missingFields.push('Configured payer CPT/ICD-10 mapping');
+    }
+    const copayPercentage = Math.max(0, Math.min(100, 100 - (selectedPatient.insurance.coveragePercentage || 0)));
+    const copayAmount = Math.round(service.estimatedCost * copayPercentage) / 100;
+    const supportingDocuments = { labReport, imagingReport };
+    const remarks = eligibilityClassification === 'Mapping Review Required'
+      ? 'Internal request queued for payer-specific CPT/ICD-10 mapping review. No external gateway submission has occurred.'
+      : isEmergency
+      ? 'Emergency waiver path: immediate treatment; 24-hour notification target starts when stabilization is recorded. No external gateway submission has occurred.'
+      : 'Request prepared for payer submission. No external gateway is configured; SLA timer is an operational target, not a received-payer-response timer.';
     const request = addInsuranceApproval({
       patientId: selectedPatient.id,
       patientName: `${selectedPatient.firstName} ${selectedPatient.lastName}`,
@@ -365,18 +498,42 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
       serviceCode: service.serviceCode,
       estimatedCost: service.estimatedCost,
       approvedAmount: 0,
-      copayPercentage: 0,
-      copayAmount: 0,
-      approvalStatus: 'Pending',
+      copayPercentage,
+      copayAmount,
+      approvalStatus: isEmergency ? 'Waiver Notification Due' : 'Pending',
       approvalDate: requestDate,
       validUntil: '',
       authorisedBy: currentUser.name,
-      remarks: 'Requested by attending physician; awaiting medical coder review.',
+      remarks,
       serviceRecordId: service.id,
       encounterTokenId: service.encounterTokenId,
+      requestType,
+      eligibilityClassification,
+      emiratesId: selectedPatient.emiratesId,
+      payerId,
+      facilityDhaLicense,
+      doctorLicense,
+      icd10Code: service.icd10Code,
+      clinicalRationale: service.clinicalRationale,
+      supportingDocuments,
+      requestedAt: requestedAt.toISOString(),
+      slaDueAt: getInsuranceRequestDueAt(requestType, requestedAt),
+      gatewayStatus: 'Not Connected',
+      emergencyWaiver: isEmergency ? {
+        immediateTreatment: true,
+      } : undefined,
+      missingFields: [...new Set(missingFields)],
+      financialBreakdown: {
+        currency: 'AED',
+        requestedAmount: Math.max(0, service.estimatedCost - copayAmount),
+        approvedAmount: 0,
+        copayPercentage,
+        copayAmount,
+        patientPayable: copayAmount,
+      },
     });
     if (!request) {
-      addNotification('Authorization Request Not Sent', 'Only the assigned doctor can submit a pending insurance authorization request.', 'warning', selectedPatient.id);
+      addNotification('Authorization Request Not Sent', 'Only an authorized treating doctor can submit an insurance authorization request.', 'warning', selectedPatient.id);
       return;
     }
     updatePatient(selectedPatient.id, {
@@ -888,7 +1045,7 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                   </div>
                 </div>
 
-                <form onSubmit={handleAddService} className="mb-4 grid grid-cols-1 gap-2 rounded-lg bg-slate-50 p-3 sm:grid-cols-2 xl:grid-cols-5">
+                <form onSubmit={handleAddService} className="mb-4 grid grid-cols-1 gap-2 rounded-lg bg-slate-50 p-3 sm:grid-cols-2 xl:grid-cols-4">
                   <label className="text-[11px] font-semibold text-slate-700 sm:col-span-2 xl:col-span-1">
                     Service name
                     <input required value={serviceName} onChange={(event) => setServiceName(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="e.g. MRI Knee" />
@@ -900,13 +1057,47 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                     </select>
                   </label>
                   <label className="text-[11px] font-semibold text-slate-700">
-                    Service code
-                    <input value={serviceCode} onChange={(event) => setServiceCode(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Optional" />
+                    CPT / service code
+                    <input value={serviceCode} onChange={(event) => setServiceCode(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Required for authorization" />
                   </label>
                   <label className="text-[11px] font-semibold text-slate-700">
-                    Estimated cost ($)
+                    Estimated cost (AED)
                     <input required type="number" min="0.01" step="0.01" value={serviceCost} onChange={(event) => setServiceCost(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" />
                   </label>
+                  <label className="text-[11px] font-semibold text-slate-700">
+                    ICD-10 diagnosis code
+                    <input value={serviceIcd10Code} onChange={(event) => setServiceIcd10Code(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Link the supporting diagnosis" />
+                  </label>
+                  <label className="text-[11px] font-semibold text-slate-700">
+                    Payer ID
+                    <input value={servicePayerId} onChange={(event) => setServicePayerId(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Payer identifier" />
+                  </label>
+                  <label className="text-[11px] font-semibold text-slate-700">
+                    Facility DHA License
+                    <input value={serviceFacilityDhaLicense} onChange={(event) => setServiceFacilityDhaLicense(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Required for authorization" />
+                  </label>
+                  <label className="text-[11px] font-semibold text-slate-700">
+                    Request pathway
+                    <select value={serviceRequestType} onChange={(event) => setServiceRequestType(event.target.value as NonNullable<InsuranceApproval['requestType']>)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal">
+                      <option value="Elective Outpatient">Elective outpatient · 6-hour target</option>
+                      <option value="Elective Inpatient">Elective inpatient · 24-hour target</option>
+                      <option value="Emergency">Emergency waiver · immediate treatment</option>
+                    </select>
+                  </label>
+                  <label className="text-[11px] font-semibold text-slate-700 sm:col-span-2">
+                    Clinical rationale
+                    <textarea value={serviceClinicalRationale} onChange={(event) => setServiceClinicalRationale(event.target.value)} rows={2} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Indication, relevant history, and medical necessity" />
+                  </label>
+                  <div className="flex flex-col justify-center gap-2 text-[11px] sm:col-span-2">
+                    <label className="flex items-center gap-2 font-medium text-slate-700">
+                      <input type="checkbox" checked={serviceIsExcluded} onChange={(event) => setServiceIsExcluded(event.target.checked)} />
+                      Payer policy identifies service as excluded
+                    </label>
+                    <label className="flex items-center gap-2 font-medium text-slate-700">
+                      <input type="checkbox" checked={serviceIsPreExisting} onChange={(event) => setServiceIsPreExisting(event.target.checked)} />
+                      Documented pre-existing condition / waiting period applies
+                    </label>
+                  </div>
                   <div className="flex items-end sm:col-span-2 xl:col-span-1">
                     <button type="submit" className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-blue-700 px-3 py-2 text-xs font-bold text-white hover:bg-blue-800">
                       <Plus className="h-3.5 w-3.5" /> Add service
@@ -928,14 +1119,80 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                               <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">{service.category}</span>
                               <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${service.billingStatus === 'Billed' ? 'bg-emerald-100 text-emerald-800' : service.billingStatus === 'Cancelled' ? 'bg-slate-200 text-slate-700' : 'bg-rose-100 text-rose-800'}`}>{service.billingStatus || 'Pending'}</span>
                               {service.serviceCode && <span className="font-mono text-[10px] text-slate-500">{service.serviceCode}</span>}
+                              {service.eligibilityClassification && <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-800">{service.eligibilityClassification}</span>}
                             </div>
-                            <p className="mt-1 text-[11px] text-slate-600">Estimated ${service.estimatedCost.toFixed(2)} · Added by {service.addedBy} · {new Date(service.addedAt).toLocaleDateString()}</p>
+                            <p className="mt-1 text-[11px] text-slate-600">Estimated AED {service.estimatedCost.toFixed(2)} · Added by {service.addedBy} · {new Date(service.addedAt).toLocaleDateString()}</p>
                             {service.invoiceId && <p className="mt-1 text-[10px] font-semibold text-emerald-800">Billed on invoice {service.invoiceId}</p>}
                             {approval && (
                               <div className="mt-1 space-y-0.5 text-[10px] text-slate-500">
                                 <p>{approval.approvalNumber || 'Authorization pending'} · {approval.insuranceProvider} · Policy {approval.policyNumber || 'not recorded'}</p>
-                                {approval.approvalStatus === 'Approved' && <p>Approved ${approval.approvedAmount.toFixed(2)} · {approval.copayPercentage}% copay (${approval.copayAmount.toFixed(2)}) · Valid until {approval.validUntil || 'not specified'}</p>}
+                                {approval.approvalStatus === 'Approved' && <p>Approved {approval.financialBreakdown ? 'AED ' : '$'}{approval.approvedAmount.toFixed(2)} · {approval.copayPercentage}% copay ({approval.financialBreakdown ? 'AED ' : '$'}{approval.copayAmount.toFixed(2)}) · Valid until {approval.validUntil || 'not specified'}</p>}
                                 {approval.remarks && <p>{approval.remarks}</p>}
+                                {approval.slaDueAt && <p>Operational response target: {new Date(approval.slaDueAt).toLocaleString()}</p>}
+                                {approval.gatewayStatus === 'Not Connected' && <p className="font-semibold text-amber-700">External payer gateway not connected; this is an internal workflow record.</p>}
+                                {approval.missingFields?.length ? <p className="font-semibold text-rose-700">Needs completion: {approval.missingFields.join(', ')}</p> : null}
+                                {approval.emergencyWaiver && approval.emergencyWaiver.stabilizedAt && (
+                                  <p className="font-semibold text-red-700">
+                                    Stabilized {new Date(approval.emergencyWaiver.stabilizedAt).toLocaleString()}
+                                    {approval.emergencyWaiver.stabilizedBy ? ` by ${approval.emergencyWaiver.stabilizedBy}` : ''}
+                                    {approval.emergencyWaiver.postStabilizationNotificationDueAt
+                                      ? ` · 24-hour notice target ${new Date(approval.emergencyWaiver.postStabilizationNotificationDueAt).toLocaleString()}`
+                                      : ''}
+                                  </p>
+                                )}
+                                {approval.emergencyWaiver &&
+                                  currentRole === 'doctor' &&
+                                  (approval.doctorId === currentUser.id || approval.doctorName === currentUser.name) &&
+                                  !approval.emergencyWaiver.stabilizedAt && (
+                                    <div className="flex flex-wrap items-end gap-2 rounded border border-red-100 bg-red-50 p-2">
+                                      <label className="flex flex-col gap-1 text-[10px] font-semibold text-red-900">
+                                        Stabilization date and time
+                                        <input
+                                          type="datetime-local"
+                                          value={stabilizationTimes[approval.id] || ''}
+                                          onChange={(event) => setStabilizationTimes((current) => ({ ...current, [approval.id]: event.target.value }))}
+                                          className="rounded border border-red-200 bg-white px-2 py-1 text-slate-800"
+                                        />
+                                      </label>
+                                      <button
+                                        type="button"
+                                        disabled={!stabilizationTimes[approval.id]}
+                                        onClick={() => {
+                                          if (recordEmergencyStabilization(approval.id, stabilizationTimes[approval.id])) {
+                                            setStabilizationTimes((current) => ({ ...current, [approval.id]: '' }));
+                                          }
+                                        }}
+                                        className="rounded bg-red-700 px-2.5 py-1.5 text-[10px] font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        Record stabilization
+                                      </button>
+                                      <p className="basis-full text-[9px] text-red-800">Immediate emergency care is not delayed. The 24-hour payer-notification target starts from this time.</p>
+                                    </div>
+                                  )}
+                                {approval.appealDraft && (
+                                  <details className="mt-2">
+                                    <summary className="cursor-pointer font-semibold text-teal-800">Open pre-filled appeal for treating physician</summary>
+                                    <textarea
+                                      value={appealDrafts[approval.id] ?? approval.appealDraft}
+                                      onChange={(event) => setAppealDrafts((current) => ({ ...current, [approval.id]: event.target.value }))}
+                                      disabled={currentRole !== 'doctor' || (approval.doctorId !== currentUser.id && approval.doctorName !== currentUser.name)}
+                                      rows={8}
+                                      className="mt-2 w-full rounded border border-slate-300 bg-white p-2 font-mono text-[10px] text-slate-700 disabled:bg-slate-100"
+                                    />
+                                    {currentRole === 'doctor' && (approval.doctorId === currentUser.id || approval.doctorName === currentUser.name) && (
+                                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => saveInsuranceAppealDraft(approval.id, appealDrafts[approval.id] ?? approval.appealDraft ?? '')}
+                                          className="rounded bg-teal-700 px-2.5 py-1.5 text-[10px] font-bold text-white hover:bg-teal-800"
+                                        >
+                                          Save appeal draft
+                                        </button>
+                                        <span className="text-[9px] text-slate-500">Internal draft only; submit through the payer gateway separately.</span>
+                                      </div>
+                                    )}
+                                  </details>
+                                )}
                               </div>
                             )}
                           </div>
@@ -944,7 +1201,9 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                               <span className={`rounded border px-2.5 py-1 text-[10px] font-bold ${
                                 approval.approvalStatus === 'Approved' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' :
                                 approval.approvalStatus === 'Pending' ? 'border-amber-200 bg-amber-50 text-amber-800' :
-                                approval.approvalStatus === 'Query Raised' ? 'border-orange-200 bg-orange-50 text-orange-800' :
+                                approval.approvalStatus === 'Pending Info' || approval.approvalStatus === 'Query Raised' ? 'border-orange-200 bg-orange-50 text-orange-800' :
+                                approval.approvalStatus === 'Waiver Notification Due' ? 'border-red-200 bg-red-50 text-red-800' :
+                                approval.approvalStatus === 'Waiver Notified' ? 'border-cyan-200 bg-cyan-50 text-cyan-800' :
                                 'border-rose-200 bg-rose-50 text-rose-800'
                               }`}>
                                 {approval.approvalStatus}

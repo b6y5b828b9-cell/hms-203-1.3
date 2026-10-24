@@ -1,26 +1,32 @@
 import React, { useState } from 'react';
 import { CalendarDays, CheckCircle2, Copy, FileCheck2, FileText, History, Plus, ShieldCheck, UserRound, X, XCircle } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
-import { InsuranceApproval, LabResult } from '../types';
+import { InsuranceApproval, InsuranceGatewayLineItemResponse, LabResult, TokenLineItem } from '../types';
+import { appendTokenLineItems, createDoctorOrderLineItems, createServiceLineItems } from '../utils/tokenStateMachine';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
 const approvalStatusClasses: Record<InsuranceApproval['approvalStatus'], string> = {
   Approved: 'border-emerald-200 bg-emerald-50 text-emerald-800',
   Pending: 'border-amber-200 bg-amber-50 text-amber-800',
+  'Pending Info': 'border-orange-200 bg-orange-50 text-orange-800',
   'Query Raised': 'border-orange-200 bg-orange-50 text-orange-800',
   Rejected: 'border-rose-200 bg-rose-50 text-rose-800',
+  'Waiver Notification Due': 'border-red-200 bg-red-50 text-red-800',
+  'Waiver Notified': 'border-cyan-200 bg-cyan-50 text-cyan-800',
 };
 
 export const MedicalCoderWorkspace: React.FC = () => {
   const {
     patients,
     insuranceApprovals,
+    receptionTokens,
     doctors,
     updateInsuranceApprovalStatus,
     publishInsuranceApproval,
     addCoderInsuranceApproval,
     addLabResult,
+    recordTokenLineItemInsuranceResponse,
     logAuditEvent,
     currentUser,
     currentRole,
@@ -53,13 +59,61 @@ export const MedicalCoderWorkspace: React.FC = () => {
   const [impression, setImpression] = useState('');
   const [status, setStatus] = useState<Exclude<LabResult['status'], 'Pending'>>('Normal');
   const [message, setMessage] = useState('');
+  const [decisionResponses, setDecisionResponses] = useState<Record<string, string>>({});
   const [approvalToPublish, setApprovalToPublish] = useState<InsuranceApproval | null>(null);
   const [publishedApprovalNumber, setPublishedApprovalNumber] = useState('');
   const [publishedAmount, setPublishedAmount] = useState('');
   const [publishedCopay, setPublishedCopay] = useState('');
   const [publishedValidUntil, setPublishedValidUntil] = useState('');
+  const [tokenResponses, setTokenResponses] = useState<Record<string, {
+    status: 'Approved' | 'Partially_Approved' | 'Denied';
+    approvedAmount: string;
+    copayAmount: string;
+    approvalNumber: string;
+    remarks: string;
+  }>>({});
 
   const patient = patients.find((item) => item.id === patientId);
+  const tokenAuthorizationQueue = receptionTokens.flatMap((token) => {
+    if (token.paymentScheme?.schemeType !== 'Insurance' && token.payMode !== 'Insurance') return [];
+    const lineItems = token.lineItems?.length
+      ? token.lineItems
+      : appendTokenLineItems(
+          createServiceLineItems(token, token.serviceItems || []),
+          token.doctorOrders ? createDoctorOrderLineItems(token, token.doctorOrders) : []
+        );
+    return lineItems
+      .filter((lineItem) => lineItem.insuranceStatus === 'Pending_Auth' || (
+        lineItem.insuranceStatus === 'Denied' && Boolean(lineItem.appealRequest)
+      ))
+      .map((lineItem) => ({ token, lineItem }));
+  });
+  const updateTokenResponse = (
+    key: string,
+    lineItem: TokenLineItem,
+    updates: Partial<InsuranceGatewayLineItemResponse>
+  ) => {
+    setTokenResponses((current) => ({
+      ...current,
+      [key]: {
+        status: updates.status
+          ? updates.status as 'Approved' | 'Partially_Approved' | 'Denied'
+          : current[key]?.status || 'Approved',
+        approvedAmount: updates.approvedAmount !== undefined
+          ? String(updates.approvedAmount)
+          : current[key]?.approvedAmount || String(lineItem.totalPrice),
+        copayAmount: updates.copayAmount !== undefined
+          ? String(updates.copayAmount)
+          : current[key]?.copayAmount || '0',
+        approvalNumber: updates.approvalNumber !== undefined
+          ? updates.approvalNumber
+          : current[key]?.approvalNumber || '',
+        remarks: updates.remarks !== undefined
+          ? updates.remarks
+          : current[key]?.remarks || '',
+      },
+    }));
+  };
   const patientApprovals = insuranceApprovals.filter((approval) => approval.patientId === patientId);
   const todayApprovals = patientApprovals.filter((approval) => approval.approvalDate === today());
   const pastApprovals = patientApprovals
@@ -184,10 +238,15 @@ export const MedicalCoderWorkspace: React.FC = () => {
     setIsAddApprovalOpen(false);
   };
 
-  const reviewApproval = (approval: InsuranceApproval, decision: Exclude<InsuranceApproval['approvalStatus'], 'Approved'>) => {
-    const reviewNote = `Reviewed by ${currentUser.name} on ${today()}: ${decision}.`;
+  const reviewApproval = (
+    approval: InsuranceApproval,
+    decision: Exclude<InsuranceApproval['approvalStatus'], 'Approved' | 'Pending'>
+  ) => {
+    const response = decisionResponses[approval.id]?.trim();
+    const reviewNote = response || `Reviewed by ${currentUser.name} on ${today()}: ${decision}.`;
     updateInsuranceApprovalStatus(approval.id, decision, reviewNote);
     logAuditEvent('UPDATE', 'Billing Invoice', approval.id, `Medical coder ${decision.toLowerCase()} insurance approval ${approval.approvalNumber}.`);
+    setDecisionResponses((current) => ({ ...current, [approval.id]: '' }));
   };
 
   const openPublishApproval = (approval: InsuranceApproval) => {
@@ -206,12 +265,16 @@ export const MedicalCoderWorkspace: React.FC = () => {
     const amount = Number(publishedAmount);
     const copay = Number(publishedCopay);
     if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(copay) || copay < 0 || copay > 100 || !publishedValidUntil) return;
-    publishInsuranceApproval(approvalToPublish.id, {
+    const published = publishInsuranceApproval(approvalToPublish.id, {
       approvalNumber: publishedApprovalNumber.trim(),
       approvedAmount: amount,
       copayPercentage: copay,
       validUntil: publishedValidUntil,
     });
+    if (!published) {
+      setMessage('The approval was not published. Review the notification and correct the request or payer mapping.');
+      return;
+    }
     setMessage(`Authorization ${publishedApprovalNumber.trim()} published for billing.`);
     setApprovalToPublish(null);
   };
@@ -276,6 +339,161 @@ export const MedicalCoderWorkspace: React.FC = () => {
         </span>
       </header>
 
+      <section className="overflow-hidden rounded-xl border border-amber-300 bg-white shadow-sm">
+        <header className="flex items-center justify-between border-b border-amber-200 bg-amber-50 px-4 py-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-bold text-amber-950">
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-500 opacity-60" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-600" />
+              </span>
+              Visit-token authorization queue
+            </h2>
+            <p className="mt-1 text-[11px] text-amber-900">
+              {canManageApprovals
+                ? 'Review token diagnoses and orders, submit them through your configured payer channel, then record the returned decision here.'
+                : 'Pending payer decisions are visible to Medical Coding / Insurance Approval.'}
+            </p>
+          </div>
+          <span className="rounded-full bg-amber-200 px-2.5 py-1 text-xs font-bold text-amber-950">
+            {tokenAuthorizationQueue.length} pending
+          </span>
+        </header>
+        <p className="border-b border-slate-100 px-4 py-2 text-[10px] text-slate-500">
+          DHPO/eClaimLink transmission is not configured in this application. Do not mark a line approved or denied until an authorized payer response has been received.
+        </p>
+        {tokenAuthorizationQueue.length === 0 ? (
+          <p className="p-4 text-xs text-slate-500">No token line items are awaiting insurance authorization.</p>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {tokenAuthorizationQueue.map(({ token, lineItem }) => {
+              const key = `${token.id}:${lineItem.id}`;
+              const response = tokenResponses[key] || {
+                status: 'Approved' as const,
+                approvedAmount: String(lineItem.totalPrice),
+                copayAmount: '0',
+                approvalNumber: '',
+                remarks: '',
+              };
+              return (
+                <form
+                  key={key}
+                  className="grid gap-3 p-4 lg:grid-cols-[minmax(180px,1fr)_minmax(180px,1fr)_repeat(3,minmax(110px,0.7fr))_auto]"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const payerResponse: InsuranceGatewayLineItemResponse = {
+                      status: response.status,
+                      approvedAmount: response.status === 'Denied' ? undefined : Number(response.approvedAmount),
+                      copayAmount: response.status === 'Denied' ? undefined : Number(response.copayAmount),
+                      approvalNumber: response.approvalNumber,
+                      remarks: response.remarks,
+                    };
+                    if (recordTokenLineItemInsuranceResponse(token.id, lineItem.id, payerResponse)) {
+                      setTokenResponses((current) => {
+                        const next = { ...current };
+                        delete next[key];
+                        return next;
+                      });
+                    }
+                  }}
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-900">
+                      Token #{token.tokenNumber} · {lineItem.name}
+                    </p>
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      {token.patientName} · {token.insuranceProvider || token.paymentScheme?.insuranceProvider || 'Insurer'} · {lineItem.department}
+                    </p>
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      ICD-10: {token.doctorOrders?.diagnoses.map((diagnosis) => diagnosis.code).join(', ') || 'Not recorded'} · Requested AED {lineItem.totalPrice.toFixed(2)}
+                    </p>
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      CPT/service code: {lineItem.code || 'Not recorded'} · Tier: {token.paymentScheme?.coverageTier || token.paymentScheme?.network || 'Not recorded'} · Co-pay: {token.paymentScheme?.copayPercent ?? 'Not recorded'}%
+                    </p>
+                    {lineItem.appealRequest && (
+                      <p className="mt-1 text-[10px] font-semibold text-orange-800">
+                        Doctor appeal from {lineItem.appealRequest.requestedBy}: {lineItem.appealRequest.reason}
+                      </p>
+                    )}
+                  </div>
+                  <label className="text-[10px] font-semibold text-slate-600">
+                    Payer decision
+                    <select
+                      value={response.status}
+                      disabled={!canManageApprovals}
+                      onChange={(event) => updateTokenResponse(key, lineItem, { status: event.target.value as 'Approved' | 'Partially_Approved' | 'Denied' })}
+                      className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-2 text-xs text-slate-800"
+                    >
+                      <option value="Approved">Approved</option>
+                      <option value="Partially_Approved">Partially approved</option>
+                      <option value="Denied">Rejected / denied</option>
+                    </select>
+                  </label>
+                  {response.status !== 'Denied' ? (
+                    <>
+                      <label className="text-[10px] font-semibold text-slate-600">
+                        Approved amount (AED)
+                        <input
+                          type="number"
+                          min="0.01"
+                          max={lineItem.totalPrice}
+                          step="0.01"
+                          required
+                          disabled={!canManageApprovals}
+                          value={response.approvedAmount}
+                          onChange={(event) => updateTokenResponse(key, lineItem, { approvedAmount: Number(event.target.value) })}
+                          className="mt-1 w-full rounded border border-slate-300 px-2 py-2 text-xs text-slate-800"
+                        />
+                      </label>
+                      <label className="text-[10px] font-semibold text-slate-600">
+                        Copay (AED)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          required
+                          disabled={!canManageApprovals}
+                          value={response.copayAmount}
+                          onChange={(event) => updateTokenResponse(key, lineItem, { copayAmount: Number(event.target.value) })}
+                          className="mt-1 w-full rounded border border-slate-300 px-2 py-2 text-xs text-slate-800"
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <label className="text-[10px] font-semibold text-slate-600 lg:col-span-2">
+                      Rejection reason
+                      <input
+                        value={response.remarks}
+                        disabled={!canManageApprovals}
+                        onChange={(event) => updateTokenResponse(key, lineItem, { remarks: event.target.value })}
+                        placeholder="e.g. X-ray required first"
+                        className="mt-1 w-full rounded border border-slate-300 px-2 py-2 text-xs text-slate-800"
+                      />
+                    </label>
+                  )}
+                  {response.status !== 'Denied' && (
+                    <label className="text-[10px] font-semibold text-slate-600">
+                      Payer approval number
+                      <input
+                        value={response.approvalNumber}
+                        disabled={!canManageApprovals}
+                        onChange={(event) => updateTokenResponse(key, lineItem, { approvalNumber: event.target.value })}
+                        className="mt-1 w-full rounded border border-slate-300 px-2 py-2 text-xs text-slate-800"
+                      />
+                    </label>
+                  )}
+                  {canManageApprovals && (
+                    <button type="submit" className="self-end rounded-md bg-teal-700 px-3 py-2 text-[10px] font-bold text-white hover:bg-teal-800">
+                      Record response
+                    </button>
+                  )}
+                </form>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center">
           <label className="flex min-w-0 flex-1 items-center gap-2 text-xs font-bold text-slate-700">
@@ -337,7 +555,10 @@ export const MedicalCoderWorkspace: React.FC = () => {
               <div className="divide-y divide-slate-100">
                 {todayApprovals.map((approval) => {
                   const expired = Boolean(approval.validUntil) && approval.validUntil < today();
-                  const canReview = approval.approvalStatus === 'Pending' || approval.approvalStatus === 'Query Raised';
+                  const canReview = approval.approvalStatus === 'Pending' ||
+                    approval.approvalStatus === 'Pending Info' ||
+                    approval.approvalStatus === 'Query Raised' ||
+                    approval.approvalStatus === 'Waiver Notification Due';
                   return (
                     <div key={approval.id} className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center">
                       <div className="min-w-0 flex-1">
@@ -348,13 +569,36 @@ export const MedicalCoderWorkspace: React.FC = () => {
                         <p className="mt-1 text-[10px] text-slate-600">{approval.department} · {approval.doctorName} · {approval.insuranceProvider}</p>
                         <p className="mt-0.5 text-[10px] text-slate-500">Approval: {approval.approvalNumber || 'Pending'} · Valid until: <span className={expired ? 'font-semibold text-rose-700' : ''}>{approval.validUntil || 'Not issued'}</span></p>
                         <p className="mt-0.5 text-[10px] text-slate-500">Approved ${approval.approvedAmount.toFixed(2)} · Copay {approval.copayPercentage}%</p>
+                        {approval.slaDueAt && <p className="mt-1 text-[10px] font-semibold text-amber-800">Response target: {new Date(approval.slaDueAt).toLocaleString()}{Date.now() > Date.parse(approval.slaDueAt) ? ' · Target exceeded' : ''}</p>}
+                        {approval.emergencyWaiver && (
+                          <p className="mt-1 text-[10px] font-semibold text-red-800">
+                            Emergency waiver: immediate treatment.
+                            {approval.emergencyWaiver.stabilizedAt
+                              ? ` Stabilized ${new Date(approval.emergencyWaiver.stabilizedAt).toLocaleString()}; post-stabilization notice due ${approval.emergencyWaiver.postStabilizationNotificationDueAt ? new Date(approval.emergencyWaiver.postStabilizationNotificationDueAt).toLocaleString() : 'target unavailable'}.`
+                              : ' Awaiting treating physician stabilization record.'}
+                            {approval.emergencyWaiver.notifiedAt ? ` · Notified ${new Date(approval.emergencyWaiver.notifiedAt).toLocaleString()}` : ''}
+                          </p>
+                        )}
+                        {approval.missingFields?.length ? <p className="mt-1 text-[10px] font-semibold text-rose-700">Missing / review: {approval.missingFields.join(', ')}</p> : null}
+                        {approval.gatewayStatus === 'Not Connected' && <p className="mt-1 text-[10px] font-semibold text-slate-600">Internal tracking only — payer gateway is not connected.</p>}
                       </div>
                       {canReview && canManageApprovals ? (
-                        <div className="flex flex-wrap gap-1.5">
-                          <button type="button" onClick={() => openPublishApproval(approval)} className="inline-flex items-center gap-1 rounded border border-emerald-200 px-2 py-1.5 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-50">
-                            <CheckCircle2 className="h-3 w-3" /> Publish
-                          </button>
-                          {approval.approvalStatus === 'Pending' && <button type="button" onClick={() => reviewApproval(approval, 'Query Raised')} className="rounded border border-amber-200 px-2 py-1.5 text-[10px] font-semibold text-amber-800 hover:bg-amber-50">Query</button>}
+                        <div className="flex max-w-sm flex-wrap gap-1.5">
+                          <input
+                            value={decisionResponses[approval.id] || ''}
+                            onChange={(event) => setDecisionResponses((current) => ({ ...current, [approval.id]: event.target.value }))}
+                            placeholder="Payer response / rejection code"
+                            aria-label={`Payer response for ${approval.patientName}`}
+                            className="w-full rounded border border-slate-300 px-2 py-1.5 text-[10px]"
+                          />
+                          {approval.approvalStatus !== 'Waiver Notification Due' && (
+                            <button type="button" onClick={() => openPublishApproval(approval)} className="inline-flex items-center gap-1 rounded border border-emerald-200 px-2 py-1.5 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-50">
+                              <CheckCircle2 className="h-3 w-3" /> Publish
+                            </button>
+                          )}
+                          {approval.approvalStatus === 'Waiver Notification Due'
+                            ? <button type="button" disabled={!approval.emergencyWaiver?.stabilizedAt || !approval.emergencyWaiver.postStabilizationNotificationDueAt} onClick={() => reviewApproval(approval, 'Waiver Notified')} className="rounded border border-cyan-200 px-2 py-1.5 text-[10px] font-semibold text-cyan-800 hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-50">Record 24-hour notice</button>
+                            : <button type="button" onClick={() => reviewApproval(approval, 'Pending Info')} className="rounded border border-amber-200 px-2 py-1.5 text-[10px] font-semibold text-amber-800 hover:bg-amber-50">Pending info</button>}
                           <button type="button" onClick={() => reviewApproval(approval, 'Rejected')} className="inline-flex items-center gap-1 rounded border border-rose-200 px-2 py-1.5 text-[10px] font-semibold text-rose-800 hover:bg-rose-50">
                             <XCircle className="h-3 w-3" /> Reject
                           </button>
@@ -389,7 +633,10 @@ export const MedicalCoderWorkspace: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {pastApprovals.map((approval) => {
-                      const canReview = approval.approvalStatus === 'Pending' || approval.approvalStatus === 'Query Raised';
+                      const canReview = approval.approvalStatus === 'Pending' ||
+                        approval.approvalStatus === 'Pending Info' ||
+                        approval.approvalStatus === 'Query Raised' ||
+                        approval.approvalStatus === 'Waiver Notification Due';
                       return (
                         <tr key={approval.id} className="align-top">
                           <td className="px-4 py-3"><p className="font-semibold text-slate-800">{approval.approvalDate}</p><p className="mt-1 text-[10px] text-slate-500">{approval.department}</p></td>
@@ -400,7 +647,7 @@ export const MedicalCoderWorkspace: React.FC = () => {
                             <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${approvalStatusClasses[approval.approvalStatus]}`}>{approval.approvalStatus}</span>
                             <div className="mt-2 flex flex-wrap gap-1.5">
                               <button type="button" onClick={() => { setIsHistoryOpen(false); openAddApproval(approval); }} className="inline-flex items-center gap-1 rounded border border-teal-200 px-2 py-1 text-[10px] font-semibold text-teal-800 hover:bg-teal-50"><Copy className="h-3 w-3" /> Copy</button>
-                              {canReview && canManageApprovals && <button type="button" onClick={() => { setIsHistoryOpen(false); openPublishApproval(approval); }} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-50">Publish</button>}
+                              {canReview && canManageApprovals && approval.approvalStatus !== 'Waiver Notification Due' && <button type="button" onClick={() => { setIsHistoryOpen(false); openPublishApproval(approval); }} className="rounded border border-emerald-200 px-2 py-1 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-50">Publish</button>}
                               {canReview && canManageApprovals && <button type="button" onClick={() => reviewApproval(approval, 'Rejected')} className="rounded border border-rose-200 px-2 py-1 text-[10px] font-semibold text-rose-800 hover:bg-rose-50">Reject</button>}
                             </div>
                           </td>

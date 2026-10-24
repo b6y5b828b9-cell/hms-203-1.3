@@ -27,6 +27,7 @@ import {
 import { useHospital } from '../context/HospitalContext';
 import { PatientAvatar } from './PatientAvatar';
 import { Patient, ReceptionToken } from '../types';
+import { canExecuteDiagnosticLineItem, getEffectiveLineItemStatus } from '../utils/tokenStateMachine';
 
 type DateFilterOption = 'today' | 'yesterday' | 'week' | 'all' | 'custom';
 type StatusFilterOption = 'all' | 'pending' | 'collected' | 'completed';
@@ -57,6 +58,8 @@ interface LabOrderCardData {
     cptCode?: string;
     price: number;
     status: 'Ordered' | 'Sample Collected' | 'Completed';
+    authorizationStatus: string;
+    authorizedForExecution: boolean;
   }>;
   diagnosticReports?: Array<{
     testOrStudyName: string;
@@ -122,8 +125,16 @@ export const DoctorLabOrdersStation: React.FC = () => {
 
     // 1. Gather orders from receptionTokens
     receptionTokens.forEach((token) => {
-      const labRequests = token.doctorOrders?.labRequests || [];
-      if (labRequests.length === 0) return;
+      const doctorLabRequests = token.doctorOrders?.labRequests || [];
+      if (doctorLabRequests.length === 0) return;
+      const labRequests = doctorLabRequests.map((request) => {
+        const lineItem = token.lineItems?.find((item) => item.id === request.id);
+        return {
+          ...request,
+          authorizationStatus: lineItem ? getEffectiveLineItemStatus(lineItem) : 'Pending_Auth',
+          authorizedForExecution: canExecuteDiagnosticLineItem(lineItem),
+        };
+      });
 
       const patient = patients.find((p) => p.id === token.patientId);
       const regNo =
@@ -262,6 +273,8 @@ export const DoctorLabOrdersStation: React.FC = () => {
 
   // Open Result Entry Modal
   const handleOpenResultModal = (card: LabOrderCardData, testId: string, testName: string, category: string) => {
+    const request = card.labRequests.find((item) => item.id === testId);
+    if (!request?.authorizedForExecution) return;
     setResultModalData({
       tokenId: card.tokenId,
       tokenNumber: card.tokenNumber,
@@ -642,7 +655,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
         ) : (
           <div className="grid grid-cols-1 gap-4">
             {filteredOrders.map((card) => {
-              const pendingCount = card.labRequests.filter((r) => r.status === 'Ordered').length;
+              const pendingCount = card.labRequests.filter((r) => r.status === 'Ordered' && r.authorizedForExecution).length;
               const collectedCount = card.labRequests.filter((r) => r.status === 'Sample Collected').length;
               const completedCount = card.labRequests.filter((r) => r.status === 'Completed').length;
               const isUrgent = card.priority === 'Urgent';
@@ -863,6 +876,9 @@ export const DoctorLabOrdersStation: React.FC = () => {
                                         {req.cptCode}
                                       </span>
                                     )}
+                                    <span className={`text-[10px] font-semibold ${req.authorizedForExecution ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}`}>
+                                      Insurance: {req.authorizationStatus}
+                                    </span>
                                   </div>
 
                                   {/* Result display if completed */}
@@ -900,7 +916,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
 
                               {/* Interactive Actions for this test */}
                               <div className="flex items-center gap-2 self-end md:self-center shrink-0">
-                                {isOrdered && (
+                                {isOrdered && req.authorizedForExecution && (
                                   <button
                                     type="button"
                                     onClick={() =>
@@ -913,7 +929,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
                                   </button>
                                 )}
 
-                                {(isCollected || isOrdered) && (
+                                {(isCollected || isOrdered) && req.authorizedForExecution && (
                                   <button
                                     type="button"
                                     onClick={() =>

@@ -104,7 +104,7 @@ export const WorkflowAssistant: React.FC = () => {
   const lowStockCount = pharmacy.filter((item) => item.stockQuantity <= item.minThreshold).length;
   const pendingInvoices = invoices.filter((invoice) => invoice.status === 'Pending' || invoice.status === 'Partially Paid').length;
   const pendingAuthorizations = insuranceApprovals.filter((approval) =>
-    approval.approvalStatus === 'Pending' || approval.approvalStatus === 'Query Raised'
+    ['Pending', 'Pending Info', 'Query Raised', 'Waiver Notification Due'].includes(approval.approvalStatus)
   ).length;
 
   const priorities = useMemo(() => {

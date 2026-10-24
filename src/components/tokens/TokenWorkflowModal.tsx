@@ -37,6 +37,67 @@ import {
   BillItem,
 } from '../../types';
 import { applyInsuranceBreakdown, sumInvoiceItemField } from '../../utils/insuranceInvoice';
+import {
+  aggregateTokenLineItemBilling,
+  appendTokenLineItems,
+  createDoctorOrderLineItems,
+  createServiceLineItems,
+  getEffectiveLineItemStatus,
+  getTokenLineItemBillingBreakdown,
+} from '../../utils/tokenStateMachine';
+
+const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (character) => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+}[character] || character));
+
+const downloadTokenClaimFile = (token: ReceptionToken) => {
+  const claim = {
+    format: 'HMS visit-token claim summary',
+    generatedAt: new Date().toISOString(),
+    tokenId: token.id,
+    tokenNumber: token.tokenNumber,
+    patient: {
+      id: token.patientId,
+      name: token.patientName,
+      emiratesId: token.patientDetails?.nationalId,
+      insuranceProvider: token.paymentScheme?.insuranceProvider || token.insuranceProvider,
+      policyNumber: token.paymentScheme?.policyNumber || token.patientDetails?.insurancePolicyNumber,
+      coverageTier: token.paymentScheme?.coverageTier || token.paymentScheme?.network,
+      coveragePercent: token.paymentScheme?.coveragePercent,
+      copayPercent: token.paymentScheme?.copayPercent,
+    },
+    diagnoses: token.doctorOrders?.diagnoses || [],
+    vitals: token.vitals,
+    lineItems: token.lineItems || [],
+    billingSummary: token.billingSummary,
+  };
+  const blob = new Blob([JSON.stringify(claim, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `token-${token.tokenNumber}-claim.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const printTokenReceipt = (token: ReceptionToken) => {
+  if (!token.billingSummary) return false;
+  const printWindow = window.open('', '_blank', 'width=900,height=700');
+  if (!printWindow) return false;
+  const rows = (token.lineItems || []).map((item) => {
+    const breakdown = getTokenLineItemBillingBreakdown(item);
+    return `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(getEffectiveLineItemStatus(item))}</td><td>AED ${breakdown.total.toFixed(2)}</td><td>AED ${breakdown.insuranceCoveredAmount.toFixed(2)}</td><td>AED ${breakdown.patientShare.toFixed(2)}</td></tr>`;
+  }).join('');
+  printWindow.document.write(`<!doctype html><html><head><title>Receipt ${escapeHtml(token.billingSummary.receiptNumber || token.tokenNumber)}</title><style>body{font:14px Arial,sans-serif;max-width:900px;margin:32px auto;color:#172033}h1{font-size:22px}p{margin:6px 0}table{width:100%;border-collapse:collapse;margin:22px 0}th,td{text-align:left;padding:9px;border-bottom:1px solid #d8dee8}th{background:#f1f5f9}.totals{margin-left:auto;width:320px}.totals p{display:flex;justify-content:space-between}.total{font-weight:bold;border-top:1px solid #172033;padding-top:10px}</style></head><body><h1>Visit Receipt</h1><p>Token #${escapeHtml(token.tokenNumber)} · Receipt ${escapeHtml(token.billingSummary.receiptNumber || 'Not assigned')}</p><p>${escapeHtml(token.patientName)} · Patient ID ${escapeHtml(token.patientId)} · ${escapeHtml(token.department)}</p><p>Insurer: ${escapeHtml(token.paymentScheme?.insuranceProvider || token.insuranceProvider || 'Self-Pay')} · Coverage tier: ${escapeHtml(token.paymentScheme?.coverageTier || token.paymentScheme?.network || 'Not recorded')}</p><table><thead><tr><th>Service</th><th>Final status</th><th>Charge</th><th>Insurer</th><th>Patient</th></tr></thead><tbody>${rows}</tbody></table><div class="totals"><p><span>Subtotal</span><span>AED ${token.billingSummary.subtotal.toFixed(2)}</span></p><p><span>Insurer share</span><span>AED ${token.billingSummary.insuranceCoveredAmount.toFixed(2)}</span></p><p class="total"><span>Patient paid</span><span>AED ${token.billingSummary.totalPaid.toFixed(2)}</span></p><p><span>Cashier</span><span>${escapeHtml(token.billingSummary.cashierName)}</span></p><p><span>Invoice</span><span>${escapeHtml(token.billingSummary.invoiceNumber || 'Not assigned')}</span></p></div><script>window.onload=()=>window.print()</script></body></html>`);
+  printWindow.document.close();
+  return true;
+};
 
 interface TokenWorkflowModalProps {
   token: ReceptionToken | null;
@@ -116,6 +177,9 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
     hospitalPriceCatalog,
     pharmacy,
     addNotification,
+    overrideTokenLineItemToSelfPay,
+    submitTokenLineItemAppeal,
+    currentRole,
   } = useHospital();
 
   const [activeTab, setActiveTab] = useState<TokenWorkflowStage>('1_REGISTRATION');
@@ -144,6 +208,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
   const [diagnoses, setDiagnoses] = useState<Array<{ code: string; description: string }>>([]);
   const [selectedDiagnosisCode, setSelectedDiagnosisCode] = useState('');
   const [doctorFormError, setDoctorFormError] = useState('');
+  const [appealReasons, setAppealReasons] = useState<Record<string, string>>({});
   const [consultationFee, setConsultationFee] = useState<number>(200);
 
   // Diagnostic Orders in EMR
@@ -231,7 +296,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
   const currentProcedureOrders = token.serviceType === 'Consultation' ? token.doctorOrders?.procedureRequests || procedureOrders : [];
   const currentServiceItems = token.serviceType === 'Consultation' ? [] : serviceItems;
   const scheme = token.paymentScheme || { schemeType: 'Self-Pay' as PaymentSchemeType };
-  const billingItems: BillItem[] = [
+  const fallbackBillingItems: BillItem[] = [
     ...(currentConsult > 0 ? [{
       id: `${token.id}-consultation`,
       description: `Physician Consultation — ${token.doctorName || 'Attending Physician'}`,
@@ -287,8 +352,39 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
       amount: item.price,
     })),
   ];
-  const subtotal = billingItems.reduce((total, item) => total + item.amount, 0);
-  const insuranceBillingItems = scheme.schemeType === 'Insurance'
+  const tokenLineItems = token.lineItems?.length ? token.lineItems : appendTokenLineItems(
+    createServiceLineItems(token, token.serviceItems || []),
+    token.doctorOrders ? createDoctorOrderLineItems(token, token.doctorOrders) : []
+  );
+  const tokenLineItemBilling = tokenLineItems.map((item): BillItem => {
+    const breakdown = getTokenLineItemBillingBreakdown(item);
+    return {
+      id: item.id,
+      serviceCode: item.code,
+      description: item.name,
+      category: item.kind === 'Consultation'
+        ? 'Consultation'
+        : item.kind === 'Lab'
+          ? 'Lab Test'
+          : item.kind === 'Radiology'
+            ? 'Radiology'
+            : item.kind === 'Medication'
+              ? 'Pharmacy'
+              : item.kind === 'Procedure'
+                ? 'Surgical Procedure'
+                : 'Technician Service',
+      unitCost: item.unitPrice,
+      quantity: item.quantity,
+      amount: breakdown.total,
+      totalPrice: breakdown.total,
+      netAmount: breakdown.total,
+      insuranceAmount: breakdown.insuranceCoveredAmount,
+      copayAmount: breakdown.copayAmount,
+    };
+  });
+  const billingItems = tokenLineItems.length ? tokenLineItemBilling : fallbackBillingItems;
+  let subtotal = billingItems.reduce((total, item) => total + item.amount, 0);
+  let insuranceBillingItems = scheme.schemeType === 'Insurance'
     ? applyInsuranceBreakdown(
         billingItems,
         scheme.serviceCopay,
@@ -329,6 +425,22 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
     const disc = scheme.discountPercent || 20;
     discountAmount = Math.round(subtotal * (disc / 100));
     patientPortion = Math.max(0, subtotal - discountAmount);
+  }
+  const tokenBillingTotals = aggregateTokenLineItemBilling(tokenLineItems);
+  const tokenAuthorizationStatus: TokenBillingSummary['insuranceAuthorizationStatus'] =
+    tokenLineItems.length === 0
+      ? insuranceAuthorizationStatus
+      : tokenLineItems.some((item) => getEffectiveLineItemStatus(item) === 'Pending_Auth')
+        ? 'Required'
+        : tokenLineItems.some((item) => ['Approved', 'Partially_Approved'].includes(getEffectiveLineItemStatus(item)))
+          ? 'Approved'
+          : 'Not Required';
+  if (tokenLineItems.length) {
+    subtotal = tokenBillingTotals.subtotal;
+    insuranceCovered = tokenBillingTotals.insuranceCoveredAmount;
+    discountAmount = 0;
+    patientPortion = tokenBillingTotals.patientShare;
+    insuranceBillingItems = tokenLineItemBilling;
   }
   const projectedInsuranceTodayAed = usedInsuranceTodayAed + insuranceCovered;
   const dailyInsuranceLimitExceeded = applyDailyInsuranceLimit &&
@@ -461,6 +573,15 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
 
   // Handle Step 4 Submission (Cashier Billing)
   const handleSettleCashier = () => {
+    if (tokenBillingTotals.pendingItemIds.length) {
+      addNotification(
+        'Billing Blocked: Authorization Pending',
+        `Resolve authorization for ${tokenBillingTotals.pendingItemIds.join(', ')} before settling this token.`,
+        'warning',
+        token.id
+      );
+      return;
+    }
     if (dailyInsuranceLimitExceeded) {
       addNotification(
         'Daily Insurance Limit Exceeded',
@@ -474,7 +595,9 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
     const billingSummary: TokenBillingSummary = {
       invoiceNumber: `INV-2026-${Math.floor(1000 + Math.random() * 9000)}`,
       subtotal,
-      items: scheme.schemeType === 'Insurance' ? insuranceBillingItems : billingItems,
+      items: tokenLineItems.length
+        ? tokenLineItemBilling
+        : scheme.schemeType === 'Insurance' ? insuranceBillingItems : billingItems,
       schemeType: scheme.schemeType,
       insuranceCoveredAmount: insuranceCovered,
       discountAmount,
@@ -488,7 +611,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
       receiptNumber: `RCP-${Math.floor(10000 + Math.random() * 90000)}`,
       cashierName: currentUser?.name || 'Cashier Desk Terminal',
       billedAt: now,
-      insuranceAuthorizationStatus: scheme.schemeType === 'Insurance' ? insuranceAuthorizationStatus : undefined,
+      insuranceAuthorizationStatus: scheme.schemeType === 'Insurance' ? tokenAuthorizationStatus : undefined,
       dailyInsuranceLimitApplied: scheme.schemeType === 'Insurance' ? applyDailyInsuranceLimit : undefined,
       dailyInsuranceLimitAed: scheme.schemeType === 'Insurance' && applyDailyInsuranceLimit ? dailyInsuranceLimitAed : undefined,
       dailyInsuranceUsedBeforeAed: scheme.schemeType === 'Insurance' && applyDailyInsuranceLimit ? usedInsuranceTodayAed : undefined,
@@ -740,11 +863,15 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500">Network Tier:</span>
-                        <span className="text-slate-900">{scheme.network || 'Tier 1 Preferred PPO'}</span>
+                        <span className="text-slate-900">{scheme.coverageTier || scheme.network || 'Not recorded'}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500">Coverage Level:</span>
-                        <span className="font-semibold text-emerald-700">{scheme.coveragePercent || 80}% Insurer Paid</span>
+                        <span className="font-semibold text-emerald-700">{scheme.coveragePercent ?? 80}% Insurer Paid</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Configured Co-pay:</span>
+                        <span className="font-semibold text-slate-900">{scheme.copayPercent ?? (100 - (scheme.coveragePercent ?? 80))}%</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500">Copay Payable:</span>
@@ -1388,6 +1515,44 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
               </div>
 
               {/* Forward to Cashier Button */}
+              {currentRole === 'doctor' && tokenLineItems.some((item) => item.insuranceStatus === 'Denied') && (
+                <section className="space-y-3 rounded-xl border border-orange-200 bg-orange-50/60 p-4">
+                  <div>
+                    <h5 className="text-xs font-bold text-orange-950">Denied orders · appeal review</h5>
+                    <p className="mt-1 text-[10px] text-orange-900">Send a clinical justification to Medical Coding. This queues an appeal request; payer submission remains a manual step until a gateway is configured.</p>
+                  </div>
+                  {tokenLineItems.filter((item) => item.insuranceStatus === 'Denied').map((item) => (
+                    <div key={item.id} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto] sm:items-end">
+                      <div>
+                        <p className="text-xs font-semibold text-slate-800">{item.name}</p>
+                        <p className="text-[10px] text-slate-500">{item.insuranceRemarks || 'Payer denial recorded'}{item.appealRequest ? ' · Appeal already queued' : ''}</p>
+                      </div>
+                      <label className="text-[10px] font-semibold text-slate-600">
+                        Clinical appeal justification
+                        <input
+                          value={appealReasons[item.id] || ''}
+                          onChange={(event) => setAppealReasons((current) => ({ ...current, [item.id]: event.target.value }))}
+                          placeholder="Explain clinical necessity or additional evidence"
+                          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-2 text-xs"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={!appealReasons[item.id]?.trim() || Boolean(item.appealRequest)}
+                        onClick={() => {
+                          if (submitTokenLineItemAppeal(token.id, item.id, appealReasons[item.id])) {
+                            setAppealReasons((current) => ({ ...current, [item.id]: '' }));
+                          }
+                        }}
+                        className="rounded-md bg-orange-700 px-3 py-2 text-[10px] font-bold text-white hover:bg-orange-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                      >
+                        {item.appealRequest ? 'Appeal queued' : 'Queue appeal'}
+                      </button>
+                    </div>
+                  ))}
+                </section>
+              )}
+
               <div className="flex justify-end gap-3 pt-2 border-t border-slate-200">
                 <button
                   type="submit"
@@ -1413,9 +1578,29 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                   </p>
                 </div>
                 {token.billingSummary ? (
-                  <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">
-                    Paid & Cleared
-                  </span>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">
+                      Paid & Cleared
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!printTokenReceipt(token)) {
+                          addNotification('Receipt Not Opened', 'Allow pop-ups to print the token receipt.', 'warning', token.id);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      <Printer className="h-3.5 w-3.5" /> Print receipt
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadTokenClaimFile(token)}
+                      className="inline-flex items-center gap-1 rounded-md border border-teal-300 bg-teal-50 px-2.5 py-1.5 text-xs font-semibold text-teal-800 hover:bg-teal-100"
+                    >
+                      <FileText className="h-3.5 w-3.5" /> Download claim file
+                    </button>
+                  </div>
                 ) : (
                   <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">
                     Payment Awaiting
@@ -1432,24 +1617,16 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                     </p>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <label className="text-[10px] font-semibold text-slate-700">
-                      Authorization status for this visit
-                      <select
-                        value={insuranceAuthorizationStatus}
-                        onChange={(event) => {
-                          const status = event.target.value;
-                          if (status === 'Required' || status === 'Approved' || status === 'Not Required') {
-                            setInsuranceAuthorizationStatus(status);
-                            if (status === 'Required') setApplyDailyInsuranceLimit(false);
-                          }
-                        }}
-                        className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
-                      >
-                        <option value="Required">Approval required / pending</option>
-                        <option value="Approved">Approval obtained</option>
-                        <option value="Not Required">Approval not required</option>
-                      </select>
-                    </label>
+                    <div className="rounded-lg border border-slate-200 bg-white p-3 text-[10px]">
+                      <span className="block font-semibold uppercase text-slate-500">Authorization status</span>
+                      <strong className={`mt-1 block text-xs ${tokenAuthorizationStatus === 'Required' ? 'text-amber-700' : 'text-emerald-700'}`}>
+                        {tokenAuthorizationStatus === 'Required'
+                          ? `Pending payer decision: ${tokenBillingTotals.pendingItemIds.join(', ')}`
+                          : tokenAuthorizationStatus === 'Not Required'
+                            ? 'No insurer-funded items remain pending; denied services are excluded unless the patient opts into self-pay.'
+                            : 'Final payer decisions recorded on token'}
+                      </strong>
+                    </div>
                     <div className="rounded-lg border border-slate-200 bg-white p-3 text-[11px]">
                       <span className="block text-[10px] font-semibold uppercase text-slate-500">Configured daily clinic limit</span>
                       <strong className="mt-1 block text-sm text-slate-900">
@@ -1510,6 +1687,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                         <tr>
                           <th className="px-2 py-2">Sr. no.</th>
                           <th className="px-2 py-2">Service name</th>
+                          <th className="px-2 py-2">Token status</th>
                           <th className="px-2 py-2 text-center">Unit</th>
                           <th className="px-2 py-2 text-right">Rate</th>
                           <th className="px-2 py-2 text-right">Discount</th>
@@ -1524,6 +1702,42 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                           <tr key={item.id}>
                             <td className="px-2 py-2 text-slate-500">{index + 1}</td>
                             <td className="px-2 py-2 font-medium text-slate-800">{item.description}</td>
+                            <td className="px-2 py-2 font-semibold text-slate-700">
+                              {(() => {
+                                const lineItem = tokenLineItems.find((entry) => entry.id === item.id);
+                                if (!lineItem) return 'Pending_Auth';
+                                return (
+                                  <div>
+                                    <span>{lineItem.insuranceStatus}</span>
+                                    {lineItem.paymentOverride && (
+                                      <span className="ml-1 rounded bg-teal-100 px-1 py-0.5 text-[9px] text-teal-800">Self_Pay</span>
+                                    )}
+                                    {lineItem.insuranceRemarks && (
+                                      <p className="mt-1 max-w-48 whitespace-normal font-normal text-rose-700">{lineItem.insuranceRemarks}</p>
+                                    )}
+                                    {lineItem.insuranceStatus === 'Denied' &&
+                                      !lineItem.paymentOverride &&
+                                      ['receptionist', 'admin', 'medical-coder'].includes(currentRole) && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (window.confirm(`Confirm that ${token.patientName} agrees to pay AED ${lineItem.totalPrice.toFixed(2)} out of pocket for ${lineItem.name}?`)) {
+                                              overrideTokenLineItemToSelfPay(
+                                                token.id,
+                                                lineItem.id,
+                                                'Patient agreed to self-pay after insurance denial at cashier.'
+                                              );
+                                            }
+                                          }}
+                                          className="mt-1 block text-left text-[10px] font-semibold text-teal-700 underline"
+                                        >
+                                          Patient agrees to cash pay · AED {lineItem.totalPrice.toFixed(2)}
+                                        </button>
+                                      )}
+                                  </div>
+                                );
+                              })()}
+                            </td>
                             <td className="px-2 py-2 text-center">{item.quantity}</td>
                             <td className="px-2 py-2 text-right font-mono">AED {item.unitCost.toFixed(2)}</td>
                             <td className="px-2 py-2 text-right font-mono">AED {(item.discountAmount || 0).toFixed(2)}</td>
@@ -1652,7 +1866,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
 
                 <button
                   onClick={handleSettleCashier}
-                  disabled={dailyInsuranceLimitExceeded}
+                  disabled={dailyInsuranceLimitExceeded || tokenBillingTotals.pendingItemIds.length > 0}
                   className="w-full sm:w-auto px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 shadow-xs transition-colors disabled:cursor-not-allowed disabled:bg-slate-400"
                 >
                   <Receipt className="w-4 h-4" /> Collect AED {patientPortion.toFixed(2)} & Settle Token

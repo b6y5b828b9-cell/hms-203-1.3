@@ -28,6 +28,11 @@ import { RefundPaymentModal } from './billing/RefundPaymentModal';
 import { ReprintInvoiceModal } from './billing/ReprintInvoiceModal';
 import { ReprintAdvanceModal } from './billing/ReprintAdvanceModal';
 import { PatientLookup } from './billing/PatientLookup';
+import {
+  InsuranceCodeMapping,
+  loadInsuranceCodeMappings,
+  saveInsuranceCodeMappings,
+} from '../utils/insuranceAuthorization';
 
 interface BillingInvoicingProps {
   onOpenNewInvoice: () => void;
@@ -73,6 +78,15 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
   const [advanceDateFilter, setAdvanceDateFilter] = useState<'all' | 'today' | 'active'>('all');
   const [posTerminalFilter, setPosTerminalFilter] = useState('all');
   const [posSearchQuery, setPosSearchQuery] = useState('');
+  const [insuranceCodeMappings, setInsuranceCodeMappings] = useState<InsuranceCodeMapping[]>(() => loadInsuranceCodeMappings());
+  const [mappingPayerId, setMappingPayerId] = useState('');
+  const [mappingCptCode, setMappingCptCode] = useState('');
+  const [mappingIcd10Code, setMappingIcd10Code] = useState('');
+  const [mappingSource, setMappingSource] = useState('');
+  const [mappingEffectiveFrom, setMappingEffectiveFrom] = useState('');
+  const [mappingEffectiveUntil, setMappingEffectiveUntil] = useState('');
+  const [mappingClassification, setMappingClassification] = useState<InsuranceCodeMapping['classification']>('Pre-Authorization Required');
+  const [mappingError, setMappingError] = useState('');
 
   // Synchronize internal active subtab with initialSubTab prop whenever route or navigation changes
   useEffect(() => {
@@ -92,6 +106,64 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
     else if (tab === 'pos') setActiveTab('billing-pos');
     else if (tab === 'insurance') setActiveTab('insurance-approvals');
     else if (tab === 'overview') setActiveTab('billing');
+  };
+
+  const addInsuranceCodeMapping = (event: React.FormEvent) => {
+    event.preventDefault();
+    setMappingError('');
+    if (!mappingPayerId.trim() || !mappingCptCode.trim() || !mappingIcd10Code.trim() || !mappingSource.trim() || !mappingEffectiveFrom) {
+      setMappingError('Enter payer ID, CPT/service code, ICD-10 code, mapping source, and effective date.');
+      return;
+    }
+    if (mappingEffectiveUntil && mappingEffectiveUntil < mappingEffectiveFrom) {
+      setMappingError('The mapping expiry date cannot be earlier than its effective date.');
+      return;
+    }
+    const duplicate = insuranceCodeMappings.some((mapping) =>
+      mapping.payerId.trim().toLowerCase() === mappingPayerId.trim().toLowerCase() &&
+      mapping.cptCode.trim().toUpperCase() === mappingCptCode.trim().toUpperCase() &&
+      mapping.icd10Code.trim().toUpperCase() === mappingIcd10Code.trim().toUpperCase()
+    );
+    if (duplicate) {
+      setMappingError('This payer / CPT / ICD-10 combination already has a rule.');
+      return;
+    }
+    const nextMappings = [
+      ...insuranceCodeMappings,
+      {
+        payerId: mappingPayerId.trim(),
+        cptCode: mappingCptCode.trim(),
+        icd10Code: mappingIcd10Code.trim(),
+        source: mappingSource.trim(),
+        effectiveFrom: mappingEffectiveFrom,
+        effectiveUntil: mappingEffectiveUntil || undefined,
+        classification: mappingClassification,
+      },
+    ];
+    try {
+      saveInsuranceCodeMappings(nextMappings);
+      setInsuranceCodeMappings(nextMappings);
+      setMappingPayerId('');
+      setMappingCptCode('');
+      setMappingIcd10Code('');
+      setMappingSource('');
+      setMappingEffectiveFrom('');
+      setMappingEffectiveUntil('');
+    } catch (error) {
+      console.error('Unable to save payer CPT/ICD-10 mapping.', error);
+      setMappingError('Could not save this rule in browser storage. Check available storage and try again.');
+    }
+  };
+
+  const removeInsuranceCodeMapping = (target: InsuranceCodeMapping) => {
+    const nextMappings = insuranceCodeMappings.filter((mapping) => mapping !== target);
+    try {
+      saveInsuranceCodeMappings(nextMappings);
+      setInsuranceCodeMappings(nextMappings);
+    } catch (error) {
+      console.error('Unable to remove payer CPT/ICD-10 mapping.', error);
+      addNotification('Mapping Rule Not Removed', 'Could not save the updated payer mapping list in browser storage.', 'warning');
+    }
   };
 
   // Modal open states
@@ -264,7 +336,7 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
     .filter((approval) => approval.approvalStatus === 'Approved')
     .reduce((sum, approval) => sum + approval.approvedAmount, 0);
   const pendingInsuranceApprovals = insuranceApprovals.filter(
-    (approval) => approval.approvalStatus === 'Pending' || approval.approvalStatus === 'Query Raised'
+    (approval) => ['Pending', 'Pending Info', 'Query Raised', 'Waiver Notification Due'].includes(approval.approvalStatus)
   ).length;
   const insuranceDoctorOptions = [...new Set(insuranceApprovals.map((approval) => approval.doctorName))].sort();
   const filteredInsuranceApprovals = insuranceApprovals.filter((approval) =>
@@ -995,6 +1067,41 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
       {/* SUB-TAB 2: INSURANCE APPROVALS & PRE-AUTHORISATION */}
       {activeSubTab === 'insurance' && canViewInsuranceApprovals && (
         <div className="space-y-4">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-900">
+            SLA values are operational targets (6 hours elective outpatient; 24 hours elective inpatient). Emergency requests use the 24-hour post-stabilization waiver notice path. This workspace records and times requests locally; no DHPO/eClaimLink/Shafafiya gateway is connected.
+          </div>
+          <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+            <div>
+              <h2 className="text-xs font-bold text-slate-900">Payer CPT / ICD-10 rule mappings</h2>
+              <p className="mt-1 text-[10px] text-slate-600">
+                Configure exact payer-specific code pairs from an approved, current payer rule source. No rules are preloaded; unmatched pairs stay in mapping review and are not submitted to an external gateway.
+              </p>
+            </div>
+            <form onSubmit={addInsuranceCodeMapping} className="grid gap-2 sm:grid-cols-2 lg:grid-cols-8">
+              <input value={mappingPayerId} onChange={(event) => setMappingPayerId(event.target.value)} placeholder="Payer ID" aria-label="Mapping payer ID" className="rounded-md border border-slate-300 px-2.5 py-2 text-xs" />
+              <input value={mappingCptCode} onChange={(event) => setMappingCptCode(event.target.value)} placeholder="CPT / service code" aria-label="Mapping CPT code" className="rounded-md border border-slate-300 px-2.5 py-2 text-xs" />
+              <input value={mappingIcd10Code} onChange={(event) => setMappingIcd10Code(event.target.value)} placeholder="ICD-10 code" aria-label="Mapping ICD-10 code" className="rounded-md border border-slate-300 px-2.5 py-2 text-xs" />
+              <input value={mappingSource} onChange={(event) => setMappingSource(event.target.value)} placeholder="Rule source/version" aria-label="Mapping source or version" className="rounded-md border border-slate-300 px-2.5 py-2 text-xs" />
+              <input type="date" value={mappingEffectiveFrom} onChange={(event) => setMappingEffectiveFrom(event.target.value)} aria-label="Mapping effective date" className="rounded-md border border-slate-300 px-2.5 py-2 text-xs" />
+              <input type="date" value={mappingEffectiveUntil} onChange={(event) => setMappingEffectiveUntil(event.target.value)} aria-label="Mapping expiry date" className="rounded-md border border-slate-300 px-2.5 py-2 text-xs" />
+              <select value={mappingClassification} onChange={(event) => setMappingClassification(event.target.value as InsuranceCodeMapping['classification'])} aria-label="Mapping classification" className="rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs">
+                {(['Direct Billing', 'Pre-Authorization Required', 'Excluded', 'Pre-Existing'] as const).map((classification) => <option key={classification} value={classification}>{classification}</option>)}
+              </select>
+              <button type="submit" className="rounded-md bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800">Add rule</button>
+              {mappingError && <p role="alert" className="text-[10px] font-semibold text-rose-700 sm:col-span-2 lg:col-span-8">{mappingError}</p>}
+            </form>
+            {insuranceCodeMappings.length > 0 && (
+              <ul className="divide-y divide-slate-100 rounded-md border border-slate-200">
+                {insuranceCodeMappings.map((mapping, index) => (
+                  <li key={`${mapping.payerId}-${mapping.cptCode}-${mapping.icd10Code}-${index}`} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-[10px]">
+                    <span className="font-mono text-slate-700">{mapping.payerId} · {mapping.cptCode} · {mapping.icd10Code} · {mapping.source} · effective {mapping.effectiveFrom}{mapping.effectiveUntil ? ` – ${mapping.effectiveUntil}` : ''}</span>
+                    <span className="font-semibold text-violet-800">{mapping.classification}</span>
+                    <button type="button" onClick={() => removeInsuranceCodeMapping(mapping)} className="font-semibold text-rose-700 hover:underline">Remove</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
           {/* Header & Metrics */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
@@ -1070,9 +1177,12 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
               <select value={insuranceApprovalStatusFilter} onChange={(event) => setInsuranceApprovalStatusFilter(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal">
                 <option value="all">All statuses</option>
                 <option value="Pending">Pending</option>
+                <option value="Pending Info">Pending info</option>
                 <option value="Query Raised">Query raised</option>
                 <option value="Approved">Approved</option>
                 <option value="Rejected">Rejected</option>
+                <option value="Waiver Notification Due">Waiver notification due</option>
+                <option value="Waiver Notified">Waiver notified</option>
               </select>
             </label>
             <label className="text-[11px] font-semibold text-slate-700">
@@ -1143,7 +1253,19 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
 
                       <td className="py-2.5 px-3">
                         <div className="font-medium text-slate-800 line-clamp-1 max-w-xs">{appr.serviceName}</div>
-                        <div className="text-[10px] text-slate-400 font-mono">{appr.serviceCode}</div>
+                        <div className="text-[10px] text-slate-400 font-mono">{appr.serviceCode || 'No CPT/service code'}{appr.icd10Code ? ` · ICD-10 ${appr.icd10Code}` : ''}</div>
+                        {appr.clinicalRationale && <div className="mt-1 max-w-xs truncate text-[10px] text-slate-500" title={appr.clinicalRationale}>{appr.clinicalRationale}</div>}
+                        <details className="mt-1">
+                          <summary className="cursor-pointer text-[9px] font-semibold text-teal-700">Request payload details</summary>
+                          <dl className="mt-1 space-y-0.5 text-[9px] text-slate-600">
+                            <div>Emirates ID: {appr.emiratesId || 'Missing'}</div>
+                            <div>Payer ID: {appr.payerId || 'Missing'} · Facility DHA license: {appr.facilityDhaLicense || 'Missing'}</div>
+                            <div>Doctor license: {appr.doctorLicense || 'Missing'} · Pathway: {appr.requestType || 'Not recorded'}</div>
+                            <div>Clinical rationale: {appr.clinicalRationale || 'Missing'}</div>
+                            {appr.financialBreakdown && <div>{appr.financialBreakdown.currency} {appr.financialBreakdown.requestedAmount.toFixed(2)} requested · {appr.financialBreakdown.copayPercentage}% copay ({appr.financialBreakdown.currency} {appr.financialBreakdown.copayAmount.toFixed(2)}) · {appr.financialBreakdown.currency} {appr.financialBreakdown.patientPayable.toFixed(2)} patient payable</div>}
+                            <div>Lab report: {appr.supportingDocuments?.labReport ? 'Recorded' : 'Not recorded'} · Imaging report: {appr.supportingDocuments?.imagingReport ? 'Recorded' : 'Not recorded'}</div>
+                          </dl>
+                        </details>
                       </td>
 
                       <td className="py-2.5 px-3 whitespace-nowrap">
@@ -1163,11 +1285,13 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
                       </td>
 
                       <td className="py-2.5 px-3 whitespace-nowrap font-mono font-bold text-emerald-700">
-                        ${appr.approvedAmount.toFixed(2)}
+                        {appr.financialBreakdown
+                          ? `AED ${appr.approvedAmount.toFixed(2)}`
+                          : `$${appr.approvedAmount.toFixed(2)}`}
                       </td>
 
                       <td className="py-2.5 px-3 whitespace-nowrap font-mono text-slate-700">
-                        {appr.copayPercentage}% (${appr.copayAmount.toFixed(2)})
+                        {appr.copayPercentage}% ({appr.financialBreakdown ? 'AED ' : '$'}{appr.copayAmount.toFixed(2)})
                       </td>
 
                       <td className="py-2.5 px-3 whitespace-nowrap font-mono text-slate-600 text-[11px]">
@@ -1181,13 +1305,29 @@ export const BillingInvoicing: React.FC<BillingInvoicingProps> = ({
                               ? 'bg-emerald-100 text-emerald-800'
                               : appr.approvalStatus === 'Pending'
                               ? 'bg-amber-100 text-amber-800'
-                              : appr.approvalStatus === 'Query Raised'
+                              : appr.approvalStatus === 'Pending Info' || appr.approvalStatus === 'Query Raised'
                               ? 'bg-orange-100 text-orange-800'
+                              : appr.approvalStatus === 'Waiver Notification Due'
+                              ? 'bg-red-100 text-red-800'
+                              : appr.approvalStatus === 'Waiver Notified'
+                              ? 'bg-cyan-100 text-cyan-800'
                               : 'bg-rose-100 text-rose-800'
                           }`}
                         >
                           {appr.approvalStatus}
                         </span>
+                        {appr.eligibilityClassification && <div className="mt-1 text-[9px] font-semibold text-violet-700">{appr.eligibilityClassification}</div>}
+                        {appr.slaDueAt && <div className={`mt-1 text-[9px] ${Date.now() > Date.parse(appr.slaDueAt) ? 'font-bold text-rose-700' : 'text-slate-500'}`}>Response target {new Date(appr.slaDueAt).toLocaleString()}{Date.now() > Date.parse(appr.slaDueAt) ? ' · overdue' : ''}</div>}
+                        {appr.emergencyWaiver && (
+                          <div className="mt-1 text-[9px] font-semibold text-red-700">
+                            {appr.emergencyWaiver.stabilizedAt
+                              ? `Stabilized ${new Date(appr.emergencyWaiver.stabilizedAt).toLocaleString()} · 24h notice due ${appr.emergencyWaiver.postStabilizationNotificationDueAt ? new Date(appr.emergencyWaiver.postStabilizationNotificationDueAt).toLocaleString() : 'target unavailable'}`
+                              : 'Emergency waiver · awaiting stabilization time'}
+                            {appr.emergencyWaiver.notifiedAt ? ` · Notified ${new Date(appr.emergencyWaiver.notifiedAt).toLocaleString()}` : ''}
+                          </div>
+                        )}
+                        {appr.missingFields?.length ? <div className="mt-1 max-w-xs text-[9px] font-semibold text-rose-700">Action required: {appr.missingFields.join(', ')}</div> : null}
+                        {appr.gatewayStatus === 'Not Connected' && <div className="mt-1 text-[9px] text-slate-500">Internal tracking only · gateway not connected</div>}
                       </td>
                     </tr>
                   ))}

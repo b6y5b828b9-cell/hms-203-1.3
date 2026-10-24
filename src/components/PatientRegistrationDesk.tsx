@@ -227,7 +227,9 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
           insuranceProvider: visitInsuranceProvider.trim(),
           policyNumber: visitInsurancePolicyNumber.trim(),
           network: visitInsuranceNetwork.trim() || undefined,
+          coverageTier: visitInsuranceNetwork.trim() || undefined,
           coveragePercent: normalizedCoverage,
+          copayPercent: 100 - normalizedCoverage,
           serviceCopay: selectedPatient.insurance.serviceCopay,
           deductibleAmount: selectedPatient.insurance.deductibleAmount ||
             parseInsuranceDeductible(selectedPatient.insuranceList?.find((record) => record.isPrimary)?.copayDeductible),

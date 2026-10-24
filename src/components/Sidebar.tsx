@@ -75,7 +75,7 @@ export const Sidebar: React.FC = () => {
   ).length;
   const pendingBillsCount = invoices.filter((i) => i.status === 'Pending').length;
   const pendingInsuranceApprovalsCount = insuranceApprovals.filter(
-    (approval) => approval.approvalStatus === 'Pending' || approval.approvalStatus === 'Query Raised'
+    (approval) => ['Pending', 'Pending Info', 'Query Raised', 'Waiver Notification Due'].includes(approval.approvalStatus)
   ).length;
   const lowPharmacyCount = pharmacy.filter((p) => p.stockQuantity <= p.minThreshold).length;
   const occupiedBedsCount = wardBeds.filter((b) => b.status === 'Occupied').length;

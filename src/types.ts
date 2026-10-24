@@ -134,6 +134,14 @@ export interface PatientService {
   name: string;
   category: InsuranceApproval['serviceCategory'];
   serviceCode?: string;
+  icd10Code?: string;
+  payerId?: string;
+  facilityDhaLicense?: string;
+  requestType?: 'Elective Outpatient' | 'Elective Inpatient' | 'Emergency';
+  clinicalRationale?: string;
+  eligibilityClassification?: 'Direct Billing' | 'Pre-Authorization Required' | 'Excluded' | 'Pre-Existing' | 'Mapping Review Required';
+  isExcluded?: boolean;
+  isPreExisting?: boolean;
   estimatedCost: number;
   addedAt: string;
   addedBy: string;
@@ -670,7 +678,9 @@ export interface InsuranceApproval {
   gatewayStatus?: 'Not Connected' | 'Ready for Manual Submission' | 'Submitted' | 'Response Received';
   emergencyWaiver?: {
     immediateTreatment: boolean;
-    postStabilizationNotificationDueAt: string;
+    stabilizedAt?: string;
+    stabilizedBy?: string;
+    postStabilizationNotificationDueAt?: string;
     notifiedAt?: string;
   };
   rejectionCode?: string;
@@ -722,7 +732,9 @@ export interface TokenPaymentScheme {
   insuranceProvider?: string;
   policyNumber?: string;
   network?: string;
+  coverageTier?: string;
   coveragePercent?: number; // e.g. 80
+  copayPercent?: number; // e.g. 20
   copayAmount?: number; // e.g. 25
   deductibleAmount?: number;
   serviceCopay?: InsurancePolicy['serviceCopay'];
@@ -801,6 +813,51 @@ export interface TokenServiceItem {
   price: number;
   addedBy: string;
   addedAt: string;
+}
+
+export type TokenLineItemInsuranceStatus =
+  | 'Pending_Auth'
+  | 'Approved'
+  | 'Partially_Approved'
+  | 'Denied'
+  | 'Cash_Only';
+
+export interface InsuranceGatewayLineItemResponse {
+  status: Exclude<TokenLineItemInsuranceStatus, 'Cash_Only'>;
+  approvedAmount?: number;
+  copayAmount?: number;
+  approvalNumber?: string;
+  remarks?: string;
+}
+
+export interface TokenLineItem {
+  id: string;
+  kind: 'Consultation' | 'Service' | 'Lab' | 'Radiology' | 'Procedure' | 'Medication';
+  name: string;
+  department: string;
+  code?: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  orderedBy: string;
+  orderedAt: string;
+  insuranceStatus: TokenLineItemInsuranceStatus;
+  insuranceApprovalId?: string;
+  insuranceApprovedAmount?: number;
+  copayAmount?: number;
+  insuranceRemarks?: string;
+  appealRequest?: {
+    reason: string;
+    requestedBy: string;
+    requestedAt: string;
+  };
+  paymentOverride?: {
+    mode: 'Self_Pay';
+    reason: string;
+    overriddenBy: string;
+    overriddenAt: string;
+  };
+  fulfillmentStatus: 'Ordered' | 'In Progress' | 'Completed' | 'Dispensed';
 }
 
 export interface TokenDiagnosticReport {
@@ -910,6 +967,7 @@ export interface ReceptionToken {
   paymentScheme?: TokenPaymentScheme;
   vitals?: TokenVitalsRecord;
   serviceItems?: TokenServiceItem[];
+  lineItems?: TokenLineItem[];
   pendingServiceIds?: string[];
   doctorOrders?: TokenDoctorOrder;
   serviceBillingStates?: EncounterServiceBillingState[];

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import {
   Patient,
   Doctor,
@@ -27,6 +27,7 @@ import {
   AdvancePayment,
   RefundPayment,
   InsuranceApproval,
+  InsuranceGatewayLineItemResponse,
   PosTransaction,
   ReceptionToken,
   TokenWorkflowStage,
@@ -36,6 +37,7 @@ import {
   TokenBillingSummary,
   TokenDiagnosticReport,
   TokenServiceItem,
+  TokenLineItem,
   EncounterDocumentAttachment,
   DoctorDutyChangeRequest,
   DoctorDutySchedule,
@@ -52,6 +54,26 @@ import { getPatientPhoto } from '../utils/patientImages';
 import { parseInsuranceDeductible, sumInvoiceItemField } from '../utils/insuranceInvoice';
 import { initialHospitalPriceCatalog } from '../data/hospitalPriceCatalog';
 import { getTabInfo } from '../utils/workspaceTabs';
+import { supabaseClient } from '../lib/supabase';
+import {
+  aggregateTokenLineItemBilling,
+  appendTokenLineItems,
+  canDispenseMedicationLineItem,
+  canExecuteDiagnosticLineItem,
+  createDoctorOrderLineItems,
+  createServiceLineItems,
+  getEffectiveLineItemStatus,
+  isSelfPayToken,
+  getTokenLineItemBillingBreakdown,
+} from '../utils/tokenStateMachine';
+import {
+  classifyInsuranceEligibility,
+  createInsuranceAppealDraft,
+  extractRejectionCode,
+  getRejectionMissingFields,
+  loadInsuranceCodeMappings,
+  validateInsuranceRequestPayload,
+} from '../utils/insuranceAuthorization';
 import {
   initialPatients,
   initialDoctors,
@@ -317,7 +339,7 @@ interface HospitalContextType {
   addVitals: (patientId: string, vitals: Omit<Vitals, 'recordedAt'>) => void;
   addTriageAssessment: (patientId: string, assessment: Omit<TriageAssessment, 'id' | 'assessedAt'>) => TriageAssessment;
   recordTriageAssessment: (patientId: string, assessment: any) => TriageAssessment;
-  addMedication: (patientId: string, medication: Omit<Medication, 'id'>) => void;
+  addMedication: (patientId: string, medication: Omit<Medication, 'id'>) => Medication;
   addPrescription: (patientId: string, prescription: any) => void;
   addClinicalNote: (patientId: string, note: Omit<ClinicalNote, 'id' | 'date'>) => void;
   addLabResult: (patientId: string, lab: Omit<LabResult, 'id'>) => void;
@@ -329,7 +351,7 @@ interface HospitalContextType {
   updateAppointmentStatus: (aptId: string, status: AppointmentStatus, cancellation?: { reason: string; details?: string }) => void;
   callNextAppointment: (doctorId?: string) => void;
   // Billing Actions
-  createInvoice: (invData: Omit<Invoice, 'id' | 'subtotal' | 'patientPayable' | 'amountPaid' | 'balanceDue' | 'transactions'>) => Invoice;
+  createInvoice: (invData: Omit<Invoice, 'id' | 'subtotal' | 'patientPayable' | 'amountPaid' | 'balanceDue' | 'transactions'>) => Invoice | null;
   issueInvoice: (invoiceId: string) => void;
   processPayment: (invoiceId: string, paymentData: { amount: number; method: PaymentMethod; cardLast4?: string }) => Promise<{ success: boolean; transaction: PaymentTransaction }>;
   processSplitPayments: (
@@ -342,14 +364,28 @@ interface HospitalContextType {
   reviewRefundPayment: (id: string, decision: 'Approved' | 'Rejected') => void;
   addInsuranceApproval: (data: Omit<InsuranceApproval, 'id'>) => InsuranceApproval | null;
   addCoderInsuranceApproval: (data: Omit<InsuranceApproval, 'id'>) => InsuranceApproval | null;
-  updateInsuranceApprovalStatus: (id: string, status: Exclude<InsuranceApproval['approvalStatus'], 'Approved'>, remarks?: string) => void;
-  publishInsuranceApproval: (id: string, details: Pick<InsuranceApproval, 'approvalNumber' | 'approvedAmount' | 'copayPercentage' | 'validUntil'>) => void;
+  updateInsuranceApprovalStatus: (id: string, status: Exclude<InsuranceApproval['approvalStatus'], 'Approved' | 'Pending'>, remarks?: string) => void;
+  recordEmergencyStabilization: (id: string, stabilizedAt: string) => boolean;
+  saveInsuranceAppealDraft: (id: string, appealDraft: string) => boolean;
+  publishInsuranceApproval: (id: string, details: Pick<InsuranceApproval, 'approvalNumber' | 'approvedAmount' | 'copayPercentage' | 'validUntil'>) => boolean;
+  recordInsuranceGatewayResponse: (id: string, response: InsuranceGatewayLineItemResponse) => boolean;
   addPosTransaction: (data: Omit<PosTransaction, 'id' | 'rrnNumber'>) => PosTransaction;
   createReceptionToken: (data: Omit<ReceptionToken, 'id' | 'tokenNumber' | 'createdTime'>) => ReceptionToken;
   updateReceptionTokenStatus: (id: string, status: ReceptionToken['status']) => void;
   advanceTokenWorkflow: (tokenId: string, nextStage: TokenWorkflowStage, updates?: Partial<ReceptionToken>) => void;
   updateTokenVitals: (tokenId: string, vitals: TokenVitalsRecord, serviceItems?: TokenServiceItem[]) => void;
   updateTokenDoctorOrders: (tokenId: string, orders: TokenDoctorOrder) => void;
+  recordTokenLineItemInsuranceResponse: (
+    tokenId: string,
+    lineItemId: string,
+    response: InsuranceGatewayLineItemResponse
+  ) => boolean;
+  submitTokenLineItemAppeal: (tokenId: string, lineItemId: string, reason: string) => boolean;
+  addTokenLineItem: (
+    tokenId: string,
+    item: Omit<TokenLineItem, 'insuranceStatus' | 'insuranceApprovalId' | 'insuranceApprovedAmount' | 'copayAmount' | 'paymentOverride' | 'fulfillmentStatus'>
+  ) => boolean;
+  overrideTokenLineItemToSelfPay: (tokenId: string, lineItemId: string, reason: string) => boolean;
   settleTokenBilling: (tokenId: string, billing: TokenBillingSummary) => void;
   completeTokenDiagnosticReport: (tokenId: string, report: TokenDiagnosticReport) => void;
   updateLabOrderStatus: (
@@ -401,7 +437,8 @@ interface HospitalContextType {
     patientId: string,
     quantity: number,
     pharmacistName: string,
-    overrideWarning?: boolean
+    overrideWarning?: boolean,
+    encounterTokenId?: string
   ) => { success: boolean; error?: string; record?: PharmacyDispenseRecord };
   // Medical Certificates
   issueMedicalCertificate: (data: Omit<MedicalCertificate, 'id' | 'certificateNumber' | 'issueDate' | 'status'>) => MedicalCertificate;
@@ -448,6 +485,7 @@ interface HospitalContextType {
 }
 
 const HospitalContext = createContext<HospitalContextType | undefined>(undefined);
+const sharedClinicId = import.meta.env.VITE_HMS_CLINIC_ID as string | undefined;
 
 const STORAGE_KEYS = {
   PATIENTS: 'medcore_patients_v3',
@@ -485,6 +523,8 @@ const STORAGE_KEYS = {
 };
 
 export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const tokenSyncReady = useRef(false);
+  const dirtyTokenIds = useRef(new Set<string>());
   const [patients, setPatients] = useState<Patient[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.PATIENTS);
     if (saved) {
@@ -614,7 +654,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   });
 
-  const [receptionTokens, setReceptionTokens] = useState<ReceptionToken[]>(() => {
+  const [receptionTokens, setReceptionTokensState] = useState<ReceptionToken[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.RECEPTION_TOKENS);
       return saved ? JSON.parse(saved) : initialReceptionTokens;
@@ -622,6 +662,23 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return initialReceptionTokens;
     }
   });
+  const initialLocalTokenIds = useRef(new Set(receptionTokens.map((token) => token.id)));
+  const sharedTokenIds = useRef(new Set<string>());
+  const setReceptionTokens: React.Dispatch<React.SetStateAction<ReceptionToken[]>> = (update) => {
+    setReceptionTokensState((current) => {
+      const next = typeof update === 'function' ? update(current) : update;
+      const previousById = new Map(current.map((token) => [token.id, token]));
+      next.forEach((token) => {
+        if (
+          JSON.stringify(previousById.get(token.id)) !== JSON.stringify(token) &&
+          (!initialLocalTokenIds.current.has(token.id) || sharedTokenIds.current.has(token.id))
+        ) {
+          dirtyTokenIds.current.add(token.id);
+        }
+      });
+      return next;
+    });
+  };
 
   const [wardBeds, setWardBeds] = useState<WardBed[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.WARD_BEDS);
@@ -931,6 +988,135 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [posTransactions]);
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.RECEPTION_TOKENS, JSON.stringify(receptionTokens));
+  }, [receptionTokens]);
+  useEffect(() => {
+    const client = supabaseClient;
+    if (!client || !sharedClinicId) return;
+    let disposed = false;
+    let channel: ReturnType<typeof client.channel> | undefined;
+    tokenSyncReady.current = false;
+
+    const serializeToken = (token: ReceptionToken) => {
+      const { lineItems, ...tokenData } = token;
+      return {
+        clinic_id: sharedClinicId,
+        token_id: token.id,
+        token_data: tokenData,
+        line_items: lineItems || [],
+      };
+    };
+    const deserializeToken = (value: unknown): ReceptionToken | null => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const row = value as Record<string, unknown>;
+      const data = row.token_data;
+      if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(row.line_items)) return null;
+      const tokenData = data as Record<string, unknown>;
+      if (
+        typeof row.token_id !== 'string' ||
+        tokenData.id !== row.token_id ||
+        typeof tokenData.tokenNumber !== 'string' ||
+        typeof tokenData.patientId !== 'string' ||
+        typeof tokenData.patientName !== 'string'
+      ) return null;
+      return { ...tokenData, lineItems: row.line_items } as ReceptionToken;
+    };
+    const loadAndSyncTokens = async () => {
+      const { data: sessionData, error: sessionError } = await client.auth.getSession();
+      if (disposed) return;
+      if (sessionError) {
+        console.error('Unable to verify the Supabase session for visit-token synchronization.', sessionError);
+        return;
+      }
+      if (!sessionData.session) {
+        console.info('Shared visit-token synchronization is disabled until a Supabase session is authenticated.');
+        return;
+      }
+      channel = client
+        .channel(`hms-visit-tokens:${sharedClinicId}`)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'hms_visit_tokens', filter: `clinic_id=eq.${sharedClinicId}` },
+          (payload) => {
+            if (payload.eventType === 'DELETE') return;
+            const token = deserializeToken(payload.new);
+            if (!token) {
+              console.error('Received an invalid visit token from Supabase Realtime.', payload.new);
+              return;
+            }
+            sharedTokenIds.current.add(token.id);
+            setReceptionTokensState((current) => {
+              if (dirtyTokenIds.current.has(token.id)) return current;
+              const existing = current.find((item) => item.id === token.id);
+              if (existing && JSON.stringify(existing) === JSON.stringify(token)) return current;
+              return existing
+                ? current.map((item) => item.id === token.id ? token : item)
+                : [token, ...current];
+            });
+          }
+        )
+        .subscribe((status) => {
+          if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            console.error(`Supabase visit-token realtime channel entered ${status}.`);
+          }
+        });
+      const { data, error } = await client
+        .from('hms_visit_tokens')
+        .select('token_id, token_data, line_items')
+        .eq('clinic_id', sharedClinicId);
+      if (disposed) return;
+      if (error) {
+        console.error('Unable to load shared visit tokens from Supabase.', error);
+        return;
+      }
+      const remoteTokens = (data || []).map(deserializeToken);
+      if (remoteTokens.some((token) => token === null)) {
+        console.error('Supabase returned one or more malformed visit token records.');
+      }
+      const merged = new Map(receptionTokens.map((token) => [token.id, token]));
+      remoteTokens.forEach((token) => {
+        if (token) {
+          sharedTokenIds.current.add(token.id);
+          if (!dirtyTokenIds.current.has(token.id)) merged.set(token.id, token);
+        }
+      });
+      const tokens = [...merged.values()];
+      tokenSyncReady.current = true;
+      setReceptionTokensState(tokens);
+    };
+
+    void loadAndSyncTokens();
+    return () => {
+      disposed = true;
+      tokenSyncReady.current = false;
+      if (channel) void client.removeChannel(channel);
+    };
+  }, []);
+  useEffect(() => {
+    const client = supabaseClient;
+    const tokensToSync = receptionTokens.filter((token) => dirtyTokenIds.current.has(token.id));
+    if (!client || !sharedClinicId || !tokenSyncReady.current || tokensToSync.length === 0) return;
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        const { error } = await client
+          .from('hms_visit_tokens')
+          .upsert(tokensToSync.map((token) => {
+            const { lineItems, ...tokenData } = token;
+            return {
+              clinic_id: sharedClinicId,
+              token_id: token.id,
+              token_data: tokenData,
+              line_items: lineItems || [],
+            };
+          }), { onConflict: 'clinic_id,token_id' });
+        if (error) console.error('Unable to persist live visit-token changes to Supabase.', error);
+        else tokensToSync.forEach((token) => {
+          sharedTokenIds.current.add(token.id);
+          const current = receptionTokens.find((item) => item.id === token.id);
+          if (current && JSON.stringify(current) === JSON.stringify(token)) dirtyTokenIds.current.delete(token.id);
+        });
+      })();
+    }, 200);
+    return () => window.clearTimeout(timeoutId);
   }, [receptionTokens]);
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.WARD_BEDS, JSON.stringify(wardBeds));
@@ -1537,7 +1723,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return newAssessment;
   };
 
-  const addMedication = (patientId: string, medData: Omit<Medication, 'id'>) => {
+  const addMedication = (patientId: string, medData: Omit<Medication, 'id'>): Medication => {
     const newMed: Medication = {
       ...medData,
       id: `MED-${Date.now().toString().slice(-4)}`,
@@ -1558,6 +1744,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
     logAuditEvent('CREATE', 'Prescription', newMed.id, `Prescribed ${newMed.name} (${newMed.dosage}) by ${newMed.prescribedBy}`);
     addNotification('Prescription Added', `${newMed.name} added to medication chart by ${newMed.prescribedBy}.`, 'info', patientId);
+    return newMed;
   };
 
   const addClinicalNote = (patientId: string, noteData: Omit<ClinicalNote, 'id' | 'date'>) => {
@@ -1753,7 +1940,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const addPrescription = (patientId: string, rx: any) => {
-    addMedication(patientId, {
+    const medication = addMedication(patientId, {
       name: rx.medicationName || rx.name,
       dosage: rx.dosage || 'Standard',
       frequency: rx.frequency || 'Daily',
@@ -1765,6 +1952,26 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       startDate: new Date().toISOString().split('T')[0],
       status: 'Active',
     });
+    if (rx.encounterTokenId) {
+      const stockItem = pharmacy.find((item) =>
+        medication.name.toLowerCase().includes(item.name.toLowerCase()) ||
+        medication.name.toLowerCase().includes(item.genericName.toLowerCase())
+      );
+      const quantity = Math.max(1, Number(rx.quantity) || 1);
+      const unitPrice = Math.max(0, Number(rx.unitPrice) || stockItem?.unitPrice || 0);
+      addTokenLineItem(rx.encounterTokenId, {
+        id: medication.id,
+        kind: 'Medication',
+        name: medication.name,
+        department: 'Pharmacy',
+        code: medication.catalogCode || stockItem?.sku,
+        quantity,
+        unitPrice,
+        totalPrice: unitPrice * quantity,
+        orderedBy: medication.prescribedBy,
+        orderedAt: new Date().toISOString(),
+      });
+    }
     appendPatientVisit(patientId, {
       visitDate: new Date().toISOString().split('T')[0],
       doctorName: rx.prescribedBy || currentUser.name,
@@ -1958,23 +2165,84 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const createInvoice = (
     invData: Omit<Invoice, 'id' | 'subtotal' | 'patientPayable' | 'amountPaid' | 'balanceDue' | 'transactions'>
-  ): Invoice => {
+  ): Invoice | null => {
     const createdAt = invData.createdAt || new Date().toISOString();
-    const subtotal = invData.items.reduce(
+    const linkedToken = invData.encounterTokenId
+      ? receptionTokens.find((token) => token.id === invData.encounterTokenId)
+      : undefined;
+    if (invData.encounterTokenId && !linkedToken) {
+      addNotification('Invoice Not Created', 'The selected visit token could not be found.', 'warning', invData.encounterTokenId);
+      return null;
+    }
+    const tokenLineItems = linkedToken
+      ? linkedToken.lineItems?.length ? linkedToken.lineItems : appendTokenLineItems(
+          createServiceLineItems(linkedToken, linkedToken.serviceItems || []),
+          linkedToken.doctorOrders ? createDoctorOrderLineItems(linkedToken, linkedToken.doctorOrders) : []
+        )
+      : [];
+    let invoiceItems = invData.items;
+    let tokenBillingTotals: ReturnType<typeof aggregateTokenLineItemBilling> | undefined;
+    if (linkedToken) {
+      const requestedIds = new Set(invData.items.map((item) => item.sourceServiceId || item.id));
+      const billedLineItems = tokenLineItems.filter((item) => requestedIds.has(item.id));
+      const unmatchedItems = invData.items.filter((item) =>
+        !tokenLineItems.some((lineItem) => lineItem.id === (item.sourceServiceId || item.id))
+      );
+      if (!billedLineItems.length || unmatchedItems.length) {
+        addNotification(
+          'Invoice Not Created',
+          'Every charge on a token-linked invoice must match a line item on that visit token.',
+          'warning',
+          linkedToken.id
+        );
+        return null;
+      }
+      const unresolvedItems = billedLineItems.filter((item) => getEffectiveLineItemStatus(item) === 'Pending_Auth');
+      if (unresolvedItems.length && invData.status !== 'Draft') {
+        addNotification(
+          'Invoice Not Created: Authorization Pending',
+          `Resolve authorization for ${unresolvedItems.map((item) => item.name).join(', ')} before issuing this invoice.`,
+          'warning',
+          linkedToken.id
+        );
+        return null;
+      }
+      tokenBillingTotals = aggregateTokenLineItemBilling(billedLineItems);
+      invoiceItems = invData.items.map((item) => {
+        const lineItem = billedLineItems.find((entry) => entry.id === (item.sourceServiceId || item.id));
+        if (!lineItem) return item;
+        const breakdown = getTokenLineItemBillingBreakdown(lineItem);
+        return {
+          ...item,
+          id: lineItem.id,
+          description: lineItem.name,
+          unitCost: lineItem.unitPrice,
+          quantity: lineItem.quantity,
+          amount: breakdown.total,
+          totalPrice: breakdown.total,
+          netAmount: breakdown.total,
+          discountAmount: 0,
+          insuranceAmount: breakdown.insuranceCoveredAmount,
+          copayAmount: breakdown.copayAmount,
+        };
+      });
+    }
+    const subtotal = invoiceItems.reduce(
       (sum, item) => sum + (Number(item.amount ?? item.totalPrice) || 0),
       0
     );
-    const hasInsuranceBreakdown = invData.items.some((item) => item.insuranceAmount !== undefined);
-    const netTotal = invData.items.reduce(
+    const hasInsuranceBreakdown = invoiceItems.some((item) => item.insuranceAmount !== undefined);
+    const netTotal = invoiceItems.reduce(
       (sum, item) => sum + (Number(item.netAmount ?? item.amount ?? item.totalPrice) || 0),
       0
     );
-    const insuranceCovered = Number(invData.insuranceCoveredAmount ?? invData.insuranceCovered) || 0;
-    const copay = Number(invData.copayAmount) || 0;
+    const insuranceCovered = tokenBillingTotals?.insuranceCoveredAmount ??
+      (Number(invData.insuranceCoveredAmount ?? invData.insuranceCovered) || 0);
+    const copay = tokenBillingTotals?.copayAmount ?? (Number(invData.copayAmount) || 0);
     const patientPayable = hasInsuranceBreakdown
       ? Math.max(0, netTotal - insuranceCovered)
       : Math.max(0, netTotal - insuranceCovered + copay);
-    const sanitizedItems: BillItem[] = invData.items.map((it) => {
+    const sanitizedItems: BillItem[] = invoiceItems.map((it) => {
       const amt = Number(it.amount ?? it.totalPrice) || 0;
       return {
         ...it,
@@ -1995,7 +2263,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       subtotal,
       tax: 0,
       totalAmount: netTotal,
-      discountAmount: Number(invData.discountAmount) || sumInvoiceItemField(invData.items, 'discountAmount'),
+      discountAmount: tokenBillingTotals ? 0 : Number(invData.discountAmount) || sumInvoiceItemField(invoiceItems, 'discountAmount'),
       paidAmount: 0,
       insuranceCoveredAmount: insuranceCovered,
       insuranceCovered,
@@ -2471,8 +2739,76 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
   };
 
+  const syncTokenLineItemAuthorization = (
+    approval: InsuranceApproval,
+    status: TokenLineItem['insuranceStatus']
+  ) => {
+    if (!approval.encounterTokenId) return;
+    setReceptionTokens((prev) => prev.map((token) => {
+      if (token.id !== approval.encounterTokenId) return token;
+      const existingItems = token.lineItems?.length
+        ? token.lineItems
+        :
+        appendTokenLineItems(
+          createServiceLineItems(token, token.serviceItems || []),
+          token.doctorOrders ? createDoctorOrderLineItems(token, token.doctorOrders) : []
+        );
+      const byServiceId = approval.serviceRecordId
+        ? existingItems.filter((item) => item.id === approval.serviceRecordId)
+        : [];
+      const byCode = !byServiceId.length && approval.serviceCode
+        ? existingItems.filter((item) => item.code === approval.serviceCode)
+        : [];
+      const matchingItems = byServiceId.length
+        ? byServiceId
+        : byCode.length
+          ? byCode
+          : existingItems.filter((item) => item.name.trim().toLowerCase() === approval.serviceName.trim().toLowerCase());
+      if (!matchingItems.length) return token;
+      const matchingIds = new Set(matchingItems.map((item) => item.id));
+      const updatedLineItems = existingItems.map((item) => matchingIds.has(item.id)
+        ? {
+            ...item,
+            insuranceStatus: status,
+            insuranceApprovalId: approval.id,
+            insuranceApprovedAmount: status === 'Approved' || status === 'Partially_Approved'
+              ? approval.approvedAmount
+              : undefined,
+            copayAmount: status === 'Approved' || status === 'Partially_Approved'
+              ? approval.copayAmount
+              : undefined,
+            insuranceRemarks: approval.remarks,
+          }
+        : item);
+      const logItem = {
+        stage: token.currentStage || '3_DOCTOR_EMR',
+        timestamp: new Date().toISOString(),
+        action: `Insurance response updated ${matchingItems.map((item) => item.name).join(', ')} to ${status}.`,
+        actor: currentUser.name,
+      };
+      return {
+        ...token,
+        lineItems: updatedLineItems,
+        historyLogs: [...(token.historyLogs || []), logItem],
+      };
+    }));
+  };
+
   const addInsuranceApproval = (data: Omit<InsuranceApproval, 'id'>): InsuranceApproval | null => {
-    if (currentRole !== 'doctor' || data.approvalStatus !== 'Pending') return null;
+    if (
+      currentRole !== 'doctor' ||
+      (data.approvalStatus !== 'Pending' && data.approvalStatus !== 'Waiver Notification Due')
+    ) return null;
+    const missingFields = validateInsuranceRequestPayload(data);
+    if (missingFields.length && !data.emergencyWaiver) {
+      addNotification(
+        'Authorization Request Not Recorded',
+        `Complete the required UAE payer payload fields: ${missingFields.join(', ')}.`,
+        'warning',
+        data.patientId
+      );
+      return null;
+    }
     const seq = insuranceApprovals.length + 1;
     const newId = `APP-${new Date().getFullYear()}-${String(seq).padStart(3, '0')}`;
     const newRecord: InsuranceApproval = {
@@ -2481,15 +2817,17 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
     setInsuranceApprovals((prev) => [newRecord, ...prev]);
     addNotification(
-      data.approvalStatus === 'Pending' ? 'Insurance Authorization Requested' : 'Insurance Pre-Auth Approved',
-      `${data.approvalStatus === 'Pending' ? 'Authorization requested' : `Auth #${data.approvalNumber} linked`} for ${data.patientName} under ${data.doctorName} (${data.serviceCategory}: ${data.serviceName}).`,
-      data.approvalStatus === 'Pending' ? 'info' : 'success'
+      data.emergencyWaiver ? 'Emergency Waiver Recorded' : 'Insurance Authorization Request Recorded',
+      data.emergencyWaiver
+        ? `Immediate treatment waiver recorded for ${data.patientName}; post-stabilization payer notification is due within 24 hours.`
+        : `Internal authorization request recorded for ${data.patientName} under ${data.doctorName} (${data.serviceCategory}: ${data.serviceName}).`,
+      data.emergencyWaiver ? 'warning' : 'info'
     );
     logAuditEvent(
       'CREATE',
       'Billing Invoice',
       newId,
-      `${data.approvalStatus === 'Pending' ? 'Requested' : 'Linked'} pre-authorisation #${data.approvalNumber} for ${data.patientName} under ${data.doctorName}`,
+      `${data.emergencyWaiver ? 'Recorded emergency waiver for' : 'Recorded pre-authorisation request for'} ${data.patientName} under ${data.doctorName}`,
       'HIPAA Access Log'
     );
     return newRecord;
@@ -2508,6 +2846,10 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const newId = `APP-${new Date().getFullYear()}-${String(seq).padStart(3, '0')}`;
     const newRecord: InsuranceApproval = { ...data, id: newId };
     setInsuranceApprovals((prev) => [newRecord, ...prev]);
+    syncTokenLineItemAuthorization(
+      newRecord,
+      newRecord.approvedAmount >= newRecord.estimatedCost ? 'Approved' : 'Partially_Approved'
+    );
     addNotification(
       'Insurance Approval Recorded',
       `Authorization ${data.approvalNumber} recorded for ${data.patientName} under ${data.department}.`,
@@ -2525,31 +2867,148 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const updateInsuranceApprovalStatus = (
     id: string,
-    status: Exclude<InsuranceApproval['approvalStatus'], 'Approved'>,
+    status: Exclude<InsuranceApproval['approvalStatus'], 'Approved' | 'Pending'>,
     remarks?: string
   ) => {
     if (currentRole !== 'medical-coder') return;
+    if (status === 'Waiver Notified') {
+      const approval = insuranceApprovals.find((item) => item.id === id);
+      if (!approval?.emergencyWaiver?.stabilizedAt || !approval.emergencyWaiver.postStabilizationNotificationDueAt) {
+        addNotification('Emergency Notification Not Recorded', 'Record the stabilization time before logging the 24-hour post-stabilization notice.', 'warning', approval?.patientId);
+        return;
+      }
+    }
     setInsuranceApprovals((prev) =>
       prev.map((app) =>
         app.id === id
-          ? {
-            ...app,
-            approvalStatus: status,
-            remarks: remarks !== undefined ? remarks : app.remarks,
-          }
+          ? (() => {
+            const response = remarks !== undefined ? remarks : app.remarks || '';
+            const rejectionCode = extractRejectionCode(response) || app.rejectionCode;
+            const isResponseRequiringAppeal = status === 'Pending Info' || status === 'Query Raised' || status === 'Rejected';
+            const missingFields = isResponseRequiringAppeal
+              ? [...new Set([
+                  ...(app.missingFields || []),
+                  ...getRejectionMissingFields(rejectionCode, app),
+                ])]
+              : app.missingFields;
+            const updated = {
+              ...app,
+              approvalStatus: status,
+              remarks: response,
+              rejectionCode,
+              missingFields,
+              emergencyWaiver: status === 'Waiver Notified' && app.emergencyWaiver
+                ? { ...app.emergencyWaiver, notifiedAt: new Date().toISOString() }
+                : app.emergencyWaiver,
+            };
+            return isResponseRequiringAppeal
+              ? { ...updated, appealDraft: createInsuranceAppealDraft(updated) }
+              : updated;
+          })()
           : app
       )
     );
+    const linkedApproval = insuranceApprovals.find((item) => item.id === id);
+    if (linkedApproval) {
+      syncTokenLineItemAuthorization(linkedApproval, status === 'Rejected' ? 'Denied' : 'Pending_Auth');
+    }
     addNotification('Insurance Pre-Auth Status Updated', `Authorisation ${id} status set to ${status}.`, 'info');
+  };
+
+  const recordEmergencyStabilization = (id: string, stabilizedAt: string): boolean => {
+    if (currentRole !== 'doctor') return false;
+    const approval = insuranceApprovals.find((item) => item.id === id);
+    const stabilizationTime = new Date(stabilizedAt);
+    if (approval && approval.doctorId !== currentUser.id && approval.doctorName !== currentUser.name) {
+      addNotification('Stabilization Time Not Recorded', 'Only the treating physician recorded on this emergency request can record stabilization.', 'warning', approval.patientId);
+      return false;
+    }
+    if (
+      !approval?.emergencyWaiver ||
+      !Number.isFinite(stabilizationTime.getTime()) ||
+      stabilizationTime.getTime() > Date.now() ||
+      (approval.requestedAt && stabilizationTime.toISOString() < approval.requestedAt)
+    ) {
+      addNotification('Stabilization Time Not Recorded', 'Enter a valid stabilization time after emergency care began.', 'warning', approval?.patientId);
+      return false;
+    }
+    const notificationDueAt = new Date(stabilizationTime.getTime() + 24 * 60 * 60 * 1000).toISOString();
+    setInsuranceApprovals((prev) => prev.map((item) => item.id === id
+      ? {
+          ...item,
+          emergencyWaiver: item.emergencyWaiver
+            ? {
+                ...item.emergencyWaiver,
+                stabilizedAt: stabilizationTime.toISOString(),
+                stabilizedBy: currentUser.name,
+                postStabilizationNotificationDueAt: notificationDueAt,
+              }
+            : undefined,
+          remarks: 'Emergency waiver recorded. 24-hour post-stabilization notification target is active.',
+        }
+      : item
+    ));
+    addNotification('Post-Stabilization SLA Started', `Emergency payer notification due by ${new Date(notificationDueAt).toLocaleString()}.`, 'info', approval.patientId);
+    logAuditEvent('UPDATE', 'Billing Invoice', id, `Treating physician ${currentUser.name} recorded stabilization time ${stabilizationTime.toISOString()}; post-stabilization notification due ${notificationDueAt}.`, 'HIPAA Access Log');
+    return true;
+  };
+
+  const saveInsuranceAppealDraft = (id: string, appealDraft: string): boolean => {
+    if (currentRole !== 'doctor') return false;
+    const approval = insuranceApprovals.find((item) => item.id === id);
+    if (
+      !approval ||
+      (approval.doctorId !== currentUser.id && approval.doctorName !== currentUser.name) ||
+      !['Pending Info', 'Query Raised', 'Rejected'].includes(approval.approvalStatus) ||
+      !appealDraft.trim()
+    ) {
+      addNotification('Appeal Draft Not Saved', 'Only the treating physician can save a non-empty appeal for a query or denied request.', 'warning', approval?.patientId);
+      return false;
+    }
+    const savedDraft = appealDraft.trim();
+    setInsuranceApprovals((prev) => prev.map((item) => item.id === id
+      ? { ...item, appealDraft: savedDraft }
+      : item
+    ));
+    addNotification('Appeal Draft Saved', 'The physician appeal draft is saved for manual payer submission; no external gateway submission occurred.', 'success', approval.patientId);
+    logAuditEvent('UPDATE', 'Billing Invoice', id, `Treating physician ${currentUser.name} saved an appeal draft for manual submission; no external gateway submission occurred.`, 'HIPAA Access Log');
+    return true;
   };
 
   const publishInsuranceApproval = (
     id: string,
     details: Pick<InsuranceApproval, 'approvalNumber' | 'approvedAmount' | 'copayPercentage' | 'validUntil'>
-  ) => {
-    if (currentRole !== 'medical-coder') return;
+  ): boolean => {
+    if (currentRole !== 'medical-coder') return false;
     const approval = insuranceApprovals.find((item) => item.id === id);
-    if (!approval || (approval.approvalStatus !== 'Pending' && approval.approvalStatus !== 'Query Raised')) return;
+    if (!approval || !['Pending', 'Pending Info', 'Query Raised'].includes(approval.approvalStatus)) return false;
+    const currentEligibility = approval.eligibilityClassification
+      ? classifyInsuranceEligibility({
+          payerId: approval.payerId || '',
+          cptCode: approval.serviceCode || '',
+          icd10Code: approval.icd10Code || '',
+          isExcluded: approval.eligibilityClassification === 'Excluded',
+          isPreExisting: approval.eligibilityClassification === 'Pre-Existing',
+        }, loadInsuranceCodeMappings())
+      : undefined;
+    if (currentEligibility && currentEligibility !== 'Pre-Authorization Required') {
+      addNotification('Approval Not Published', `The current payer rule classifies this item as ${currentEligibility}; only mapped pre-authorization requests can be published.`, 'warning', approval.patientId);
+      return false;
+    }
+    if (
+      !details.approvalNumber.trim() ||
+      !Number.isFinite(details.approvedAmount) ||
+      details.approvedAmount <= 0 ||
+      details.approvedAmount > approval.estimatedCost ||
+      !Number.isFinite(details.copayPercentage) ||
+      details.copayPercentage < 0 ||
+      details.copayPercentage > 100 ||
+      !details.validUntil ||
+      details.validUntil < new Date().toISOString().slice(0, 10)
+    ) {
+      addNotification('Approval Not Published', 'Enter a valid payer authorization, amount not exceeding the request, copay from 0–100%, and a valid expiry date.', 'warning', approval.patientId);
+      return false;
+    }
     const copayAmount = (details.approvedAmount * details.copayPercentage) / 100;
     setInsuranceApprovals((prev) => prev.map((item) => item.id === id
       ? {
@@ -2560,11 +3019,188 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           approvalDate: new Date().toISOString().slice(0, 10),
           authorisedBy: currentUser.name,
           remarks: `Approval published by ${currentUser.name}.`,
+          eligibilityClassification: currentEligibility || item.eligibilityClassification,
+          financialBreakdown: item.financialBreakdown
+            ? {
+                ...item.financialBreakdown,
+                approvedAmount: details.approvedAmount,
+                copayPercentage: details.copayPercentage,
+                copayAmount,
+                patientPayable: Math.max(0, item.estimatedCost - details.approvedAmount) + copayAmount,
+              }
+            : undefined,
         }
       : item
     ));
+    syncTokenLineItemAuthorization(
+      { ...approval, ...details, copayAmount },
+      details.approvedAmount >= approval.estimatedCost ? 'Approved' : 'Partially_Approved'
+    );
     addNotification('Insurance Approval Published', `Authorization ${details.approvalNumber} for ${approval.patientName} is approved and available to billing.`, 'success');
     logAuditEvent('UPDATE', 'Billing Invoice', id, `Medical coder ${currentUser.name} published insurance authorization ${details.approvalNumber}.`, 'HIPAA Access Log');
+    return true;
+  };
+
+  const recordInsuranceGatewayResponse = (
+    id: string,
+    response: InsuranceGatewayLineItemResponse
+  ): boolean => {
+    if (currentRole !== 'medical-coder') return false;
+    const approval = insuranceApprovals.find((item) => item.id === id);
+    if (!approval || !approval.encounterTokenId) {
+      addNotification('Payer Response Not Applied', 'The authorization request is not linked to a visit token.', 'warning', approval?.patientId);
+      return false;
+    }
+    if (
+      (response.status === 'Approved' || response.status === 'Partially_Approved') &&
+      (!Number.isFinite(response.approvedAmount) || Number(response.approvedAmount) <= 0 || Number(response.approvedAmount) > approval.estimatedCost)
+    ) {
+      addNotification('Payer Response Not Applied', 'The approved amount must be positive and cannot exceed the requested amount.', 'warning', approval.patientId);
+      return false;
+    }
+    if (
+      response.copayAmount !== undefined &&
+      (!Number.isFinite(response.copayAmount) || response.copayAmount < 0 || response.copayAmount > Number(response.approvedAmount || 0))
+    ) {
+      addNotification('Payer Response Not Applied', 'The returned copay must be non-negative and no greater than the approved amount.', 'warning', approval.patientId);
+      return false;
+    }
+    const lineItemStatus: TokenLineItem['insuranceStatus'] =
+      response.status === 'Approved' && Number(response.approvedAmount) < approval.estimatedCost
+        ? 'Partially_Approved'
+        : response.status;
+    const approvalStatus: InsuranceApproval['approvalStatus'] =
+      lineItemStatus === 'Denied' ? 'Rejected' :
+      lineItemStatus === 'Pending_Auth' ? 'Pending' : 'Approved';
+    const updatedApproval: InsuranceApproval = {
+      ...approval,
+      approvalStatus,
+      approvedAmount: response.approvedAmount ?? approval.approvedAmount,
+      copayAmount: response.copayAmount ?? approval.copayAmount,
+      approvalNumber: response.approvalNumber?.trim() || approval.approvalNumber,
+      remarks: response.remarks?.trim() || approval.remarks,
+      gatewayStatus: 'Response Received',
+      approvalDate: approvalStatus === 'Approved' ? new Date().toISOString().slice(0, 10) : approval.approvalDate,
+      authorisedBy: currentUser.name,
+    };
+    setInsuranceApprovals((prev) => prev.map((item) => item.id === id ? updatedApproval : item));
+    syncTokenLineItemAuthorization(updatedApproval, lineItemStatus);
+    addNotification(
+      'Payer Response Applied',
+      `${updatedApproval.serviceName} for token ${approval.encounterTokenId} is ${lineItemStatus}.`,
+      lineItemStatus === 'Denied' ? 'warning' : 'success',
+      approval.encounterTokenId
+    );
+    logAuditEvent(
+      'UPDATE',
+      'Billing Invoice',
+      id,
+      `Insurance gateway response recorded as ${lineItemStatus} for visit token ${approval.encounterTokenId}.`,
+      'HIPAA Access Log'
+    );
+    return true;
+  };
+
+  const recordTokenLineItemInsuranceResponse = (
+    tokenId: string,
+    lineItemId: string,
+    response: InsuranceGatewayLineItemResponse
+  ): boolean => {
+    if (currentRole !== 'medical-coder') {
+      addNotification('Payer Response Not Applied', 'Only Medical Coding / Insurance Approval can update token authorization statuses.', 'warning', tokenId);
+      return false;
+    }
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    const lineItem = token?.lineItems?.find((item) => item.id === lineItemId);
+    if (!token || !lineItem || (token.paymentScheme?.schemeType !== 'Insurance' && token.payMode !== 'Insurance')) {
+      addNotification('Payer Response Not Applied', 'The insured visit token or requested line item could not be found.', 'warning', tokenId);
+      return false;
+    }
+    if (
+      ['Approved', 'Partially_Approved'].includes(response.status) &&
+      (!Number.isFinite(response.approvedAmount) || Number(response.approvedAmount) <= 0 || Number(response.approvedAmount) > lineItem.totalPrice)
+    ) {
+      addNotification('Payer Response Not Applied', 'The approved amount must be positive and cannot exceed the token line-item total.', 'warning', tokenId);
+      return false;
+    }
+    if (
+      response.copayAmount !== undefined &&
+      (!Number.isFinite(response.copayAmount) || response.copayAmount < 0 || response.copayAmount > Number(response.approvedAmount || 0))
+    ) {
+      addNotification('Payer Response Not Applied', 'The payer copay must be non-negative and no greater than the approved amount.', 'warning', tokenId);
+      return false;
+    }
+    const status: TokenLineItem['insuranceStatus'] =
+      response.status === 'Approved' && Number(response.approvedAmount) < lineItem.totalPrice
+        ? 'Partially_Approved'
+        : response.status;
+    const responseAt = new Date().toISOString();
+    setReceptionTokens((prev) => prev.map((item) => item.id !== tokenId ? item : {
+      ...item,
+      lineItems: item.lineItems?.map((entry) => entry.id !== lineItemId ? entry : {
+        ...entry,
+        insuranceStatus: status,
+        insuranceApprovalId: response.approvalNumber?.trim() || entry.insuranceApprovalId,
+        insuranceApprovedAmount: ['Approved', 'Partially_Approved'].includes(status)
+          ? Number(response.approvedAmount)
+          : undefined,
+        copayAmount: ['Approved', 'Partially_Approved'].includes(status)
+          ? Number(response.copayAmount) || 0
+          : undefined,
+        insuranceRemarks: response.remarks?.trim() || undefined,
+        appealRequest: undefined,
+      }),
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: item.currentStage || '3_DOCTOR_EMR',
+          timestamp: responseAt,
+          action: `Payer response recorded for ${lineItem.name}: ${status}${response.remarks?.trim() ? ` — ${response.remarks.trim()}` : ''}.`,
+          actor: currentUser.name,
+        },
+      ],
+    }));
+    addNotification(
+      'Payer Response Applied',
+      `${lineItem.name} on Token ${token.tokenNumber} is now ${status}.`,
+      status === 'Denied' ? 'warning' : 'success',
+      tokenId
+    );
+    logAuditEvent('UPDATE', 'Billing Invoice', lineItemId, `Medical coder ${currentUser.name} recorded a payer response (${status}) for visit token ${tokenId}.`, 'HIPAA Access Log');
+    return true;
+  };
+
+  const submitTokenLineItemAppeal = (tokenId: string, lineItemId: string, reason: string): boolean => {
+    if (currentRole !== 'doctor' || !reason.trim()) {
+      addNotification('Appeal Not Submitted', 'Only the treating doctor can submit a non-empty appeal for a denied token item.', 'warning', tokenId);
+      return false;
+    }
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    const lineItem = token?.lineItems?.find((item) => item.id === lineItemId);
+    if (!token || !lineItem || lineItem.insuranceStatus !== 'Denied') {
+      addNotification('Appeal Not Submitted', 'Select a denied line item on the current visit token.', 'warning', tokenId);
+      return false;
+    }
+    const requestedAt = new Date().toISOString();
+    setReceptionTokens((previous) => previous.map((item) => item.id !== tokenId ? item : {
+      ...item,
+      lineItems: item.lineItems?.map((entry) => entry.id !== lineItemId ? entry : {
+        ...entry,
+        appealRequest: { reason: reason.trim(), requestedBy: currentUser.name, requestedAt },
+      }),
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: item.currentStage || '3_DOCTOR_EMR',
+          timestamp: requestedAt,
+          action: `Appeal requested for ${lineItem.name}: ${reason.trim()}.`,
+          actor: currentUser.name,
+        },
+      ],
+    }));
+    addNotification('Token Item Appeal Queued', `${lineItem.name} from Token ${token.tokenNumber} was sent to Medical Coding for appeal review.`, 'info', tokenId);
+    logAuditEvent('UPDATE', 'Billing Invoice', lineItemId, `Treating doctor ${currentUser.name} submitted a payer appeal request for token ${tokenId}: ${reason.trim()}.`, 'HIPAA Access Log');
+    return true;
   };
 
   const addPosTransaction = (data: Omit<PosTransaction, 'id' | 'rrnNumber'>): PosTransaction => {
@@ -2597,6 +3233,30 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const tokenNumber = String(highestTodayToken + 1).padStart(2, '0');
     const id = `TOK-${nowDate.replace(/-/g, '')}-${tokenNumber}`;
     const patient = patients.find((item) => item.id === data.patientId);
+    const insuranceScheme = data.paymentScheme?.schemeType === 'Insurance'
+      ? data.paymentScheme
+      : !data.paymentScheme && (data.payMode === 'Insurance' || (!data.payMode && patient?.payMode === 'Insurance'))
+        ? {
+            schemeType: 'Insurance' as const,
+            insuranceProvider: data.insuranceProvider || patient?.insurance.provider,
+            policyNumber: patient?.insurance.policyNumber,
+            network: patient?.insurance.network,
+            coverageTier: patient?.insurance.network,
+            coveragePercent: patient?.insurance.coveragePercentage ?? 80,
+            copayPercent: 100 - (patient?.insurance.coveragePercentage ?? 80),
+            copayAmount: patient?.insurance.copayAmount,
+            serviceCopay: patient?.insurance.serviceCopay,
+            deductibleAmount: patient?.insurance.deductibleAmount,
+          }
+        : undefined;
+    const normalizedPaymentScheme = insuranceScheme
+      ? {
+          ...insuranceScheme,
+          coverageTier: insuranceScheme.coverageTier || insuranceScheme.network || data.patientDetails?.insuranceNetwork,
+          copayPercent: insuranceScheme.copayPercent ??
+            (insuranceScheme.coveragePercent === undefined ? undefined : 100 - insuranceScheme.coveragePercent),
+        }
+      : data.paymentScheme;
     const newRecord: ReceptionToken = {
       ...data,
       patientPhone: data.patientPhone || patient?.phone,
@@ -2604,6 +3264,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       patientGender: data.patientGender || patient?.gender,
       insuranceProvider: data.insuranceProvider || patient?.insurance?.provider || 'Self-Pay',
       payMode: data.payMode || patient?.payMode || 'Self',
+      paymentScheme: normalizedPaymentScheme,
       department: data.department || patient?.department || 'General Medicine',
       patientDetails: {
         ...(patient ? {
@@ -2661,6 +3322,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           actor: 'Registration Desk',
         },
       ],
+      lineItems: data.lineItems || [],
       visitCode: data.visitCode || (data.serviceType === 'Consultation' ? 'C' : data.serviceType === 'Physio Technician' ? 'TEC' : 'NC'),
       registeredBy: data.registeredBy || currentUser?.name || 'Hospital Staff',
     };
@@ -2785,6 +3447,9 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             ...tok,
             vitals,
             ...(serviceItems ? { serviceItems } : {}),
+            ...(serviceItems
+              ? { lineItems: appendTokenLineItems(tok.lineItems, createServiceLineItems(tok, serviceItems)) }
+              : {}),
             currentStage: needsCashier ? '4_CASHIER_BILLING' : '3_DOCTOR_EMR',
             status: 'Waiting',
             counterOrRoom: needsCashier ? 'Cashier Counter' : 'Doctor Consultation Suite',
@@ -2815,6 +3480,10 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const updateTokenDoctorOrders = (tokenId: string, orders: TokenDoctorOrder) => {
+    if (currentRole !== 'doctor') {
+      addNotification('Doctor Orders Not Saved', 'Only the treating doctor can append orders to a visit token.', 'warning', tokenId);
+      return;
+    }
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     setReceptionTokens((prev) =>
       prev.map((tok) => {
@@ -2828,6 +3497,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return {
             ...tok,
             doctorOrders: orders,
+            lineItems: appendTokenLineItems(tok.lineItems, createDoctorOrderLineItems(tok, orders)),
             currentStage: '4_CASHIER_BILLING', // Auto-advances to Cashier!
             status: 'Waiting',
             counterOrRoom: 'Cashier Counter',
@@ -2865,7 +3535,173 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
   };
 
+  const addTokenLineItem = (
+    tokenId: string,
+    item: Omit<TokenLineItem, 'insuranceStatus' | 'insuranceApprovalId' | 'insuranceApprovedAmount' | 'copayAmount' | 'paymentOverride' | 'fulfillmentStatus'>
+  ): boolean => {
+    if (currentRole !== 'doctor') {
+      addNotification('Token Order Not Added', 'Only a doctor can append a clinical order to a visit token.', 'warning', tokenId);
+      return false;
+    }
+    const token = receptionTokens.find((existing) => existing.id === tokenId);
+    if (!token) {
+      addNotification('Token Order Not Added', 'The visit token could not be found.', 'warning', tokenId);
+      return false;
+    }
+    const insuranceStatus: TokenLineItem['insuranceStatus'] =
+      token.paymentScheme?.schemeType === 'Insurance' || token.payMode === 'Insurance'
+        ? 'Pending_Auth'
+        : 'Cash_Only';
+    const orderedLineItem: TokenLineItem = {
+      ...item,
+      insuranceStatus,
+      fulfillmentStatus: 'Ordered',
+      paymentOverride: isSelfPayToken(token)
+        ? {
+            mode: 'Self_Pay',
+            reason: 'Visit registered under a self-pay payment scheme.',
+            overriddenBy: 'Reception',
+            overriddenAt: item.orderedAt,
+          }
+        : undefined,
+    };
+    setReceptionTokens((prev) => prev.map((existing) => {
+      if (existing.id !== tokenId) return existing;
+      const orders: TokenDoctorOrder = existing.doctorOrders || {
+        diagnoses: [],
+        labRequests: [],
+        radiologyRequests: [],
+        procedureRequests: [],
+        consultationFee: 0,
+        orderedByDoctorId: currentUser.id,
+        orderedByDoctorName: currentUser.name,
+        orderedAt: item.orderedAt,
+      };
+      const doctorOrders = item.kind === 'Lab' && !orders.labRequests.some((order) => order.id === item.id)
+        ? {
+            ...orders,
+            labRequests: [...orders.labRequests, {
+              id: item.id,
+              testName: item.name,
+              category: item.department,
+              cptCode: item.code,
+              price: item.totalPrice,
+              status: 'Ordered' as const,
+            }],
+          }
+        : item.kind === 'Radiology' && !orders.radiologyRequests.some((order) => order.id === item.id)
+          ? {
+              ...orders,
+              radiologyRequests: [...orders.radiologyRequests, {
+                id: item.id,
+                studyName: item.name,
+                modality: item.department,
+                cptCode: item.code,
+                price: item.totalPrice,
+                status: 'Ordered' as const,
+              }],
+            }
+          : item.kind === 'Procedure' && !orders.procedureRequests.some((order) => order.id === item.id)
+            ? {
+                ...orders,
+                procedureRequests: [...orders.procedureRequests, {
+                  id: item.id,
+                  procedureName: item.name,
+                  cptCode: item.code || '',
+                  price: item.totalPrice,
+                  status: 'Scheduled' as const,
+                }],
+              }
+            : orders;
+      return {
+        ...existing,
+        lineItems: appendTokenLineItems(existing.lineItems, [orderedLineItem]),
+        ...(item.kind === 'Lab' || item.kind === 'Radiology' || item.kind === 'Procedure'
+          ? { doctorOrders }
+          : {}),
+      };
+    }));
+    return true;
+  };
+
+  const overrideTokenLineItemToSelfPay = (tokenId: string, lineItemId: string, reason: string): boolean => {
+    if (!['admin', 'medical-coder', 'receptionist'].includes(currentRole) || !reason.trim()) {
+      addNotification(
+        'Self-Pay Override Not Applied',
+        'Only an administrator, insurance approver, or cashier/receptionist with documented patient consent can apply a self-pay override.',
+        'warning',
+        tokenId
+      );
+      return false;
+    }
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    const lineItem = token?.lineItems?.find((item) => item.id === lineItemId);
+    if (!lineItem) {
+      addNotification('Self-Pay Override Not Applied', 'The requested token line item was not found.', 'warning', tokenId);
+      return false;
+    }
+    if (currentRole === 'receptionist' && lineItem.insuranceStatus !== 'Denied') {
+      addNotification('Self-Pay Override Not Applied', 'Cashiers can record a self-pay override only after a payer denial.', 'warning', tokenId);
+      return false;
+    }
+    const overriddenAt = new Date().toISOString();
+    setReceptionTokens((prev) => prev.map((item) => item.id !== tokenId ? item : {
+      ...item,
+      lineItems: item.lineItems?.map((lineItem) => lineItem.id === lineItemId
+        ? {
+            ...lineItem,
+            paymentOverride: {
+              mode: 'Self_Pay',
+              reason: reason.trim(),
+              overriddenBy: currentUser.name,
+              overriddenAt,
+            },
+          }
+        : lineItem),
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: item.currentStage || '3_DOCTOR_EMR',
+          timestamp: overriddenAt,
+          action: `Line item ${lineItemId} overridden to Self_Pay: ${reason.trim()}`,
+          actor: currentUser.name,
+        },
+      ],
+    }));
+    logAuditEvent('UPDATE', 'Billing Invoice', lineItemId, `Self-pay override applied to token ${tokenId}: ${reason.trim()}.`, 'HIPAA Access Log');
+    return true;
+  };
+
   const settleTokenBilling = (tokenId: string, billing: TokenBillingSummary) => {
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    if (!token) {
+      addNotification('Billing Not Settled', 'The visit token could not be found.', 'warning', tokenId);
+      return;
+    }
+    const lineItems = token.lineItems?.length ? token.lineItems : appendTokenLineItems(
+      createServiceLineItems(token, token.serviceItems || []),
+      token.doctorOrders ? createDoctorOrderLineItems(token, token.doctorOrders) : []
+    );
+    const totals = aggregateTokenLineItemBilling(lineItems);
+    if (totals.pendingItemIds.length) {
+      addNotification(
+        'Billing Blocked: Authorization Pending',
+        `Resolve authorization for line item(s) ${totals.pendingItemIds.join(', ')} before settling this token.`,
+        'warning',
+        tokenId
+      );
+      return;
+    }
+    const finalizedBilling: TokenBillingSummary = {
+      ...billing,
+      subtotal: totals.subtotal,
+      insuranceCoveredAmount: totals.insuranceCoveredAmount,
+      copayOrSelfPayAmount: totals.patientShare,
+      copayAmount: totals.copayAmount,
+      totalPaid: totals.patientShare,
+      balanceDue: 0,
+      paymentStatus: 'Paid',
+    };
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     setReceptionTokens((prev) =>
       prev.map((tok) => {
@@ -2873,8 +3709,8 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const logItem = {
             stage: '4_CASHIER_BILLING' as TokenWorkflowStage,
             timestamp: now,
-            action: `Invoice settled. Subtotal: AED ${billing.subtotal.toFixed(2)}, Covered/Discount: AED ${(billing.insuranceCoveredAmount + billing.discountAmount).toFixed(2)}, Patient Paid: AED ${billing.totalPaid.toFixed(2)} (${billing.paymentMethod}).${billing.insuranceAuthorizationStatus ? ` Authorization: ${billing.insuranceAuthorizationStatus}.` : ''}${billing.dailyInsuranceLimitApplied ? ` Daily insurance cap enforced: AED ${billing.dailyInsuranceUsedAfterAed?.toFixed(2)} / AED ${billing.dailyInsuranceLimitAed?.toFixed(2)}.` : ''}`,
-            actor: billing.cashierName,
+            action: `Invoice settled from finalized token line items. Subtotal: AED ${finalizedBilling.subtotal.toFixed(2)}, Insurer share: AED ${finalizedBilling.insuranceCoveredAmount.toFixed(2)}, Patient share: AED ${finalizedBilling.copayOrSelfPayAmount.toFixed(2)} (${finalizedBilling.paymentMethod}).${finalizedBilling.dailyInsuranceLimitApplied ? ` Daily insurance cap enforced: AED ${finalizedBilling.dailyInsuranceUsedAfterAed?.toFixed(2)} / AED ${finalizedBilling.dailyInsuranceLimitAed?.toFixed(2)}.` : ''}`,
+            actor: finalizedBilling.cashierName,
           };
 
           const hasDiagnostics =
@@ -2886,7 +3722,8 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
           return {
             ...tok,
-            billingSummary: billing,
+            lineItems,
+            billingSummary: finalizedBilling,
             currentStage: nextStage,
             status: hasDiagnostics ? 'Waiting' : 'Completed',
             counterOrRoom: hasDiagnostics ? 'Diagnostics & Imaging Wing' : 'Discharge Complete',
@@ -2900,12 +3737,29 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     addNotification(
       'Cashier Invoice Settled',
-      `Services invoiced for Token ${tokenId}. Receipt: ${billing.receiptNumber || 'RCP-' + Date.now().toString().slice(-5)}. Forwarded to Diagnostics.`,
+      `Services invoiced for Token ${tokenId}. Receipt: ${finalizedBilling.receiptNumber || 'RCP-' + Date.now().toString().slice(-5)}. Forwarded to Diagnostics.`,
       'success'
     );
   };
 
   const completeTokenDiagnosticReport = (tokenId: string, report: TokenDiagnosticReport) => {
+    const tokenForReport = receptionTokens.find((item) => item.id === tokenId);
+    const reportLineItem = tokenForReport?.lineItems?.find((item) =>
+      item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase()
+    ) || (tokenForReport?.doctorOrders
+      ? createDoctorOrderLineItems(tokenForReport, tokenForReport.doctorOrders).find((item) =>
+          item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase()
+        )
+      : undefined);
+    if (!canExecuteDiagnosticLineItem(reportLineItem)) {
+      addNotification(
+        'Diagnostic Execution Blocked',
+        `The token line item for ${report.testOrStudyName} is not authorized for execution.`,
+        'warning',
+        tokenId
+      );
+      return;
+    }
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     setReceptionTokens((prev) =>
       prev.map((tok) => {
@@ -2920,6 +3774,11 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return {
             ...tok,
             diagnosticReports: updatedReports,
+            lineItems: (tok.lineItems?.length ? tok.lineItems : (tok.doctorOrders
+              ? createDoctorOrderLineItems(tok, tok.doctorOrders)
+              : [])).map((item) => item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase()
+              ? { ...item, fulfillmentStatus: 'Completed' }
+              : item),
             currentStage: '6_COMPLETED_REPORTS',
             status: 'Completed',
             completedAt: now,
@@ -2969,6 +3828,20 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     status: 'Ordered' | 'Sample Collected' | 'Completed',
     notes?: string
   ) => {
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    const lineItem = token?.lineItems?.find((item) => item.id === requestId) ||
+      (token?.doctorOrders
+        ? createDoctorOrderLineItems(token, token.doctorOrders).find((item) => item.id === requestId)
+        : undefined);
+    if (!canExecuteDiagnosticLineItem(lineItem)) {
+      addNotification(
+        'Lab Execution Blocked',
+        `Authorization for ${lineItem?.name || 'this test'} is ${lineItem?.insuranceStatus || 'missing'}. Approval or a documented self-pay override is required.`,
+        'warning',
+        tokenId
+      );
+      return;
+    }
     const nowTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     let testName = 'Lab test';
 
@@ -2996,6 +3869,11 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               ...tok.doctorOrders,
               labRequests: updatedRequests,
             },
+            lineItems: (tok.lineItems?.length ? tok.lineItems : createDoctorOrderLineItems(tok, tok.doctorOrders)).map((item) =>
+              item.id === requestId
+                ? { ...item, fulfillmentStatus: status === 'Completed' ? 'Completed' : status === 'Sample Collected' ? 'In Progress' : 'Ordered' }
+                : item
+            ),
             historyLogs: tok.historyLogs ? [...tok.historyLogs, logItem] : [logItem],
           };
         }
@@ -3024,6 +3902,20 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       technicianName?: string;
     }
   ) => {
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    const lineItem = token?.lineItems?.find((item) => item.id === requestId) ||
+      (token?.doctorOrders
+        ? createDoctorOrderLineItems(token, token.doctorOrders).find((item) => item.id === requestId)
+        : undefined);
+    if (!canExecuteDiagnosticLineItem(lineItem)) {
+      addNotification(
+        'Lab Result Blocked',
+        `Authorization for ${lineItem?.name || resultData.testName} is ${lineItem?.insuranceStatus || 'missing'}. Approval or a documented self-pay override is required.`,
+        'warning',
+        tokenId
+      );
+      return;
+    }
     const nowDate = new Date().toISOString().split('T')[0];
     const nowTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 
@@ -3071,6 +3963,16 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             doctorOrders: tok.doctorOrders
               ? { ...tok.doctorOrders, labRequests: updatedLabRequests }
               : undefined,
+            lineItems: (tok.lineItems?.length ? tok.lineItems : createDoctorOrderLineItems(tok, tok.doctorOrders || {
+              diagnoses: [],
+              labRequests: [],
+              radiologyRequests: [],
+              procedureRequests: [],
+              consultationFee: 0,
+              orderedByDoctorId: '',
+              orderedByDoctorName: '',
+              orderedAt: nowTime,
+            })).map((item) => item.id === requestId ? { ...item, fulfillmentStatus: 'Completed' } : item),
             diagnosticReports: updatedReports,
             historyLogs: tok.historyLogs ? [...tok.historyLogs, logItem] : [logItem],
           };
@@ -3553,7 +4455,8 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     patientId: string,
     quantity: number,
     pharmacistName: string,
-    overrideWarning: boolean = false
+    overrideWarning: boolean = false,
+    encounterTokenId?: string
   ): { success: boolean; error?: string; record?: PharmacyDispenseRecord } => {
     const patient = patients.find((p) => p.id === patientId);
     if (!patient) return { success: false, error: 'Patient record not found.' };
@@ -3561,8 +4464,19 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const rx =
       (patient.prescriptions || []).find((p) => p.id === prescriptionId) ||
       (patient.medications || []).find((m) => m.id === prescriptionId);
-
-    const rxName = rx?.name || (rx as any)?.medicationName || 'Medication';
+    const token = receptionTokens.find((item) =>
+      item.patientId === patientId &&
+      (item.id === encounterTokenId || item.doctorOrders?.medicationRequests?.some((medication) => medication.id === prescriptionId))
+    );
+    const tokenMedication = token?.doctorOrders?.medicationRequests?.find((item) => item.id === prescriptionId);
+    const tokenLineItem = token?.lineItems?.find((item) => item.id === prescriptionId);
+    if ((tokenMedication || encounterTokenId) && !canDispenseMedicationLineItem(tokenLineItem)) {
+      return {
+        success: false,
+        error: `Dispensing blocked: ${tokenLineItem?.insuranceStatus || 'authorization status missing'}. Pharmacy requires Approved status or a documented Self_Pay override.`,
+      };
+    }
+    const rxName = rx?.name || tokenMedication?.medicationName || tokenLineItem?.name || 'Medication';
 
     // Allergy cross-screening check
     const patientAllergiesList = patient.allergies.map((a) => (typeof a === 'string' ? a : a.allergen).toLowerCase());
@@ -3639,6 +4553,14 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
 
     setPharmacyDispenseRecords((prev) => [record, ...prev]);
+    if (token && tokenLineItem) {
+      setReceptionTokens((prev) => prev.map((item) => item.id !== token.id ? item : {
+        ...item,
+        lineItems: item.lineItems?.map((lineItem) => lineItem.id === prescriptionId
+          ? { ...lineItem, fulfillmentStatus: 'Dispensed' }
+          : lineItem),
+      }));
+    }
 
     logAuditEvent(
       'DISPENSE',
@@ -3880,7 +4802,8 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setRefundPayments(initialRefundPayments);
     setInsuranceApprovals(initialInsuranceApprovals);
     setPosTransactions(initialPosTransactions);
-    setReceptionTokens(initialReceptionTokens);
+    dirtyTokenIds.current.clear();
+    setReceptionTokensState(initialReceptionTokens);
     localStorage.clear();
     setLastBackupTimestampState(Date.now() - 26 * 60 * 60 * 1000);
     setBackupReminderSnoozedUntilState(null);
@@ -4113,12 +5036,18 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         addInsuranceApproval,
         addCoderInsuranceApproval,
         updateInsuranceApprovalStatus,
+        recordEmergencyStabilization,
+        saveInsuranceAppealDraft,
         addPosTransaction,
         createReceptionToken,
         updateReceptionTokenStatus,
         advanceTokenWorkflow,
         updateTokenVitals,
         updateTokenDoctorOrders,
+        recordTokenLineItemInsuranceResponse,
+        submitTokenLineItemAppeal,
+        addTokenLineItem,
+        overrideTokenLineItemToSelfPay,
         settleTokenBilling,
         completeTokenDiagnosticReport,
         updateLabOrderStatus,
@@ -4154,6 +5083,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         saveHospitalPriceItem,
         deactivateHospitalPriceItem,
         publishInsuranceApproval,
+        recordInsuranceGatewayResponse,
         recordTriageAssessment: (patientId: string, assessment: any) => addTriageAssessment(patientId, assessment),
         updateBedStatus: (bedId: string, status: WardBed['status']) => setWardBeds((prev) => prev.map((b) => (b.id === bedId ? { ...b, status } : b))),
         dispenseMedication: (itemId: string, quantity: number, patientId?: string) => dispensePharmacyItem(itemId, quantity, patientId || ''),
