@@ -26,8 +26,8 @@ import {
 } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { PatientAvatar } from './PatientAvatar';
-import { Patient, ReceptionToken } from '../types';
-import { canExecuteDiagnosticLineItem, getEffectiveLineItemStatus } from '../utils/tokenStateMachine';
+import { Patient, ReceptionToken, TokenServiceResult } from '../types';
+import { canRoleExecuteServiceLineItem, getEffectiveLineItemStatus } from '../utils/tokenStateMachine';
 
 type DateFilterOption = 'today' | 'yesterday' | 'week' | 'all' | 'custom';
 type StatusFilterOption = 'all' | 'pending' | 'collected' | 'completed';
@@ -53,6 +53,7 @@ interface LabOrderCardData {
   diagnoses?: Array<{ code: string; description: string }>;
   labRequests: Array<{
     id: string;
+    kind: string;
     testName: string;
     category: string;
     cptCode?: string;
@@ -60,6 +61,7 @@ interface LabOrderCardData {
     status: 'Ordered' | 'Sample Collected' | 'Completed';
     authorizationStatus: string;
     authorizedForExecution: boolean;
+    executionStatus: 'READY_FOR_EXECUTION';
   }>;
   diagnosticReports?: Array<{
     testOrStudyName: string;
@@ -80,6 +82,8 @@ export const DoctorLabOrdersStation: React.FC = () => {
     recordLabTestResult,
     setSelectedPatientId,
     setActiveTab,
+    currentRole,
+    addNotification,
   } = useHospital();
 
   // Search & Filter States
@@ -106,6 +110,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
   const [resultStatus, setResultStatus] = useState<'Normal' | 'Elevated' | 'Critical'>('Normal');
   const [findingsNotes, setFindingsNotes] = useState('');
   const [technicianName, setTechnicianName] = useState(currentUser?.name || 'Lab Specialist');
+  const [reportFiles, setReportFiles] = useState<NonNullable<TokenServiceResult['reportFiles']>>([]);
 
   const [requisitionSlipData, setRequisitionSlipData] = useState<LabOrderCardData | null>(null);
 
@@ -125,14 +130,23 @@ export const DoctorLabOrdersStation: React.FC = () => {
 
     // 1. Gather orders from receptionTokens
     receptionTokens.forEach((token) => {
-      const doctorLabRequests = token.doctorOrders?.labRequests || [];
-      if (doctorLabRequests.length === 0) return;
-      const labRequests = doctorLabRequests.map((request) => {
-        const lineItem = token.lineItems?.find((item) => item.id === request.id);
+      const readyLineItems = (token.lineItems || []).filter((lineItem) => {
+        return canRoleExecuteServiceLineItem(lineItem, currentRole);
+      });
+      if (readyLineItems.length === 0) return;
+      const labRequests = readyLineItems.map((lineItem) => {
+        const request = token.doctorOrders?.labRequests.find((entry) => entry.id === lineItem.id);
         return {
-          ...request,
-          authorizationStatus: lineItem ? getEffectiveLineItemStatus(lineItem) : 'Pending_Auth',
-          authorizedForExecution: canExecuteDiagnosticLineItem(lineItem),
+          id: lineItem.id,
+          kind: lineItem.kind,
+          testName: request?.testName || lineItem.name,
+          category: request?.category || lineItem.kind,
+          cptCode: request?.cptCode || lineItem.code,
+          price: lineItem.totalPrice,
+          status: request?.status || 'Ordered' as const,
+          authorizationStatus: getEffectiveLineItemStatus(lineItem),
+          authorizedForExecution: true,
+          executionStatus: 'READY_FOR_EXECUTION' as const,
         };
       });
 
@@ -177,7 +191,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
     });
 
     return cards;
-  }, [receptionTokens, patients, todayStr]);
+  }, [receptionTokens, patients, todayStr, currentRole]);
 
   // Overall Statistics
   const stats = useMemo(() => {
@@ -275,6 +289,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
   const handleOpenResultModal = (card: LabOrderCardData, testId: string, testName: string, category: string) => {
     const request = card.labRequests.find((item) => item.id === testId);
     if (!request?.authorizedForExecution) return;
+    setReportFiles([]);
     setResultModalData({
       tokenId: card.tokenId,
       tokenNumber: card.tokenNumber,
@@ -326,15 +341,43 @@ export const DoctorLabOrdersStation: React.FC = () => {
       findings: findingsNotes,
       technicianName,
       notes: `Entered via Lab Orders Station by ${technicianName}`,
+      reportFiles,
     });
 
     setResultModalData(null);
+    setReportFiles([]);
+  };
+
+  const handleReportFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(event.target.files || []);
+    event.target.value = '';
+    for (const file of selectedFiles) {
+      if (!['application/pdf', 'image/jpeg', 'image/png'].includes(file.type) || file.size > 10 * 1024 * 1024) {
+        addNotification('Report Attachment Rejected', 'Attach a PDF, JPEG, or PNG file up to 10 MB.', 'warning');
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => addNotification('Report Upload Failed', `Could not read ${file.name}.`, 'warning');
+      reader.onload = () => {
+        if (typeof reader.result !== 'string') {
+          addNotification('Report Upload Failed', `Could not read ${file.name}.`, 'warning');
+          return;
+        }
+        setReportFiles((previous) => [...previous, {
+          id: `RESULT-${Date.now()}-${previous.length}`,
+          fileName: file.name,
+          mimeType: file.type as 'application/pdf' | 'image/jpeg' | 'image/png',
+          dataUrl: reader.result as string,
+        }]);
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   // Mark all pending samples as collected on a card
   const handleCollectAllSamples = (card: LabOrderCardData) => {
     card.labRequests.forEach((req) => {
-      if (req.status === 'Ordered') {
+      if (req.kind === 'Lab' && req.status === 'Ordered') {
         updateLabOrderStatus(card.tokenId, req.id, 'Sample Collected', 'Specimen received in Phlebotomy');
       }
     });
@@ -655,7 +698,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
         ) : (
           <div className="grid grid-cols-1 gap-4">
             {filteredOrders.map((card) => {
-              const pendingCount = card.labRequests.filter((r) => r.status === 'Ordered' && r.authorizedForExecution).length;
+              const pendingCount = card.labRequests.filter((r) => r.kind === 'Lab' && r.status === 'Ordered' && r.authorizedForExecution).length;
               const collectedCount = card.labRequests.filter((r) => r.status === 'Sample Collected').length;
               const completedCount = card.labRequests.filter((r) => r.status === 'Completed').length;
               const isUrgent = card.priority === 'Urgent';
@@ -916,7 +959,7 @@ export const DoctorLabOrdersStation: React.FC = () => {
 
                               {/* Interactive Actions for this test */}
                               <div className="flex items-center gap-2 self-end md:self-center shrink-0">
-                                {isOrdered && req.authorizedForExecution && (
+                                {isOrdered && req.kind === 'Lab' && req.authorizedForExecution && (
                                   <button
                                     type="button"
                                     onClick={() =>
@@ -1074,6 +1117,31 @@ export const DoctorLabOrdersStation: React.FC = () => {
                   placeholder="Enter analyzer findings, specimen observations, or pathology impressions..."
                   className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-600"
                 />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Attach signed report (PDF, JPEG, or PNG; up to 10 MB each)
+                </label>
+                <input
+                  type="file"
+                  accept="application/pdf,image/jpeg,image/png"
+                  multiple
+                  onChange={handleReportFileChange}
+                  className="block w-full rounded-xl border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700"
+                />
+                {reportFiles.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {reportFiles.map((file) => (
+                      <li key={file.id} className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
+                        <span>{file.fileName}</span>
+                        <button type="button" onClick={() => setReportFiles((previous) => previous.filter((item) => item.id !== file.id))} className="font-semibold text-rose-700">
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
 
               <div>

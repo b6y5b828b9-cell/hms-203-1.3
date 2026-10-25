@@ -56,6 +56,7 @@ export const Sidebar: React.FC = () => {
     'Patient Registration': true,
     'Appointment': true,
     'Patient Care': true,
+    'Outpatient Nursing': true,
     'Diagnostics & Pharmacy': true,
     'Clinical Services': true,
     'Appointments & Duty': true,
@@ -116,7 +117,7 @@ export const Sidebar: React.FC = () => {
       icon: UserPlus,
       badge: null,
       category: currentRole === 'receptionist' ? 'Reception Desk Portal' : 'Patient Care',
-      roles: ['admin', 'nurse', 'receptionist'],
+      roles: ['admin', 'receptionist'],
     },
     {
       id: 'medical-records' as NavigationTab,
@@ -124,7 +125,7 @@ export const Sidebar: React.FC = () => {
       icon: FileText,
       badge: null,
       category: currentRole === 'receptionist' ? 'Reception Desk Portal' : 'Patient Care',
-      roles: ['admin', 'nurse', 'receptionist', 'doctor'],
+      roles: ['admin', 'receptionist', 'doctor'],
     },
     {
       id: 'certificates' as NavigationTab,
@@ -139,7 +140,7 @@ export const Sidebar: React.FC = () => {
       label: 'Nurse Triage Station',
       icon: Activity,
       badge: statTriageCount > 0 ? `${statTriageCount} STAT` : null,
-      category: 'Patient Care',
+      category: currentRole === 'nurse' ? 'Outpatient Nursing' : 'Patient Care',
       roles: ['admin', 'nurse', 'doctor'],
     },
     {
@@ -184,11 +185,11 @@ export const Sidebar: React.FC = () => {
     },
     {
       id: 'lab-orders' as NavigationTab,
-      label: 'Doctor Lab Orders',
+      label: currentRole === 'nurse' ? 'Nurse Service Execution' : 'Service Execution Queue',
       icon: FlaskConical,
       badge: pendingLabOrdersCount > 0 ? `${pendingLabOrdersCount} Orders` : null,
       category: 'Diagnostics & Pharmacy',
-      roles: ['admin', 'doctor', 'nurse', 'lab', 'receptionist', 'pharmacist', 'physiotherapist', 'radiology', 'medical-coder'],
+      roles: ['admin', 'nurse', 'lab', 'radiology'],
     },
     {
       id: 'labs' as NavigationTab,
@@ -540,6 +541,7 @@ export const Sidebar: React.FC = () => {
       {/* Categorized Navigation Links */}
       <div className="space-y-3">
         {[
+          'Outpatient Nursing',
           'Patient Registration',
           'Appointment',
           'Billing',

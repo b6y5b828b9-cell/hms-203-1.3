@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ArrowRight, Bot, Send, ShieldCheck, Sparkles, X } from 'lucide-react';
-import { NavigationTab, ROLE_DEFINITIONS, useHospital } from '../context/HospitalContext';
+import { NavigationTab, useHospital } from '../context/HospitalContext';
+import { ROLE_DEFINITIONS } from '../context/roleDefinitions';
 import { UserRole } from '../types';
 
 interface WorkflowAction {

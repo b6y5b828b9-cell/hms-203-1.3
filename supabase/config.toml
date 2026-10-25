@@ -1,0 +1,5 @@
+[functions.doctor-api]
+verify_jwt = true
+
+[cpt-api]
+verify_jwt = true

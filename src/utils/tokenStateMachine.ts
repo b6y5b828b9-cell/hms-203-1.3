@@ -4,6 +4,7 @@ import {
   TokenLineItem,
   TokenLineItemInsuranceStatus,
   TokenServiceItem,
+  UserRole,
 } from '../types';
 
 const defaultAuthorizationStatus = (token: ReceptionToken): TokenLineItemInsuranceStatus =>
@@ -35,6 +36,11 @@ const createLineItem = (
       }
     : undefined),
   fulfillmentStatus: prior?.fulfillmentStatus || 'Ordered',
+  executionStatus: prior?.executionStatus || (
+    ['Lab', 'Radiology', 'Procedure', 'Service', 'Medication'].includes(item.kind)
+      ? 'PENDING_SETTLEMENT'
+      : undefined
+  ),
 });
 
 export const createDoctorOrderLineItems = (
@@ -114,6 +120,12 @@ export const createDoctorOrderLineItems = (
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       totalPrice: item.price,
+      medicationDetails: {
+        ddcCode: item.sku,
+        dosage: item.dosage,
+        duration: item.duration,
+        instructions: item.instructions,
+      },
       orderedBy,
       orderedAt,
     });
@@ -166,10 +178,56 @@ export const canExecuteDiagnosticLineItem = (item: TokenLineItem | undefined): b
     getEffectiveLineItemStatus(item) === 'Self_Pay'
   ));
 
+export const canExecuteSettledService = (item: TokenLineItem | undefined): boolean =>
+  Boolean(
+    item &&
+    ['Lab', 'Radiology', 'Procedure', 'Service'].includes(item.kind) &&
+    item.executionStatus === 'READY_FOR_EXECUTION' &&
+    canExecuteDiagnosticLineItem(item)
+  );
+
+export const isOutpatientTreatmentReady = (
+  token: ReceptionToken,
+  item: TokenLineItem | undefined
+): boolean => {
+  if (!item || !['Procedure', 'Service'].includes(item.kind) || item.executionStatus !== 'READY_FOR_EXECUTION') {
+    return false;
+  }
+  if (item.insuranceStatus === 'Approved') return true;
+  const cashSettled = token.billingSummary?.paymentStatus === 'SETTLED';
+  return Boolean(cashSettled && (
+    item.insuranceStatus === 'Cash_Only' ||
+    item.paymentOverride?.mode === 'Self_Pay'
+  ));
+};
+
+export const canExecuteOutpatientTreatment = (
+  token: ReceptionToken,
+  item: TokenLineItem | undefined
+): boolean => token.status === 'Ready for Treatment' && isOutpatientTreatmentReady(token, item);
+
+export const canRoleExecuteServiceLineItem = (item: TokenLineItem | undefined, role: UserRole): boolean =>
+  Boolean(
+    item &&
+    canExecuteSettledService(item) &&
+    (
+      role === 'admin' ||
+      (role === 'nurse' && ['Procedure', 'Service'].includes(item.kind)) ||
+      (role === 'lab' && /lab|laboratory/i.test(item.department)) ||
+      (role === 'radiology' && /radiolog|imaging/i.test(item.department))
+    )
+  );
+
+export const settleServiceLineItems = (lineItems: TokenLineItem[]): TokenLineItem[] =>
+  lineItems.map((item) => item.executionStatus === 'PENDING_SETTLEMENT' && canExecuteDiagnosticLineItem(item)
+    ? { ...item, executionStatus: 'READY_FOR_EXECUTION' }
+    : item);
+
 export const canDispenseMedicationLineItem = (item: TokenLineItem | undefined): boolean =>
   Boolean(item && (
-    getEffectiveLineItemStatus(item) === 'Approved' ||
-    getEffectiveLineItemStatus(item) === 'Self_Pay'
+    item.executionStatus === 'READY_FOR_EXECUTION' &&
+    (getEffectiveLineItemStatus(item) === 'Approved' ||
+      getEffectiveLineItemStatus(item) === 'Self_Pay')
   ));
 
 export const getTokenLineItemBillingBreakdown = (item: TokenLineItem) => {

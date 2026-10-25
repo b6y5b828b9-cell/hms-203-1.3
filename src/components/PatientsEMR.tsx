@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Users,
   Search,
@@ -8,6 +8,7 @@ import {
   FileText,
   AlertTriangle,
   CheckCircle2,
+  CircleCheck,
   Calendar,
   Video,
   Printer,
@@ -24,7 +25,6 @@ import { Patient, Prescription, ClinicalNote, PatientService, InsuranceApproval 
 import { ICD10_COMMON_CODES } from '../data/icd10Codes';
 import { PatientDashboard } from './PatientDashboard';
 import { PatientDiagnosticReportsView } from './reports/PatientDiagnosticReportsView';
-import { TokenWorkflowModal } from './tokens/TokenWorkflowModal';
 import { PatientAvatar } from './PatientAvatar';
 import {
   classifyInsuranceEligibility,
@@ -35,6 +35,11 @@ import {
   loadInsuranceCodeMappings,
   validateInsuranceRequestPayload,
 } from '../utils/insuranceAuthorization';
+import { addCptTariffToVisit, CptTariff, searchCptTariffs } from '../utils/cptTariffApi';
+import {
+  getEffectiveLineItemStatus,
+  getTokenLineItemBillingBreakdown,
+} from '../utils/tokenStateMachine';
 
 interface PatientsEMRProps {
   onOpenTriageModal: (patientId: string) => void;
@@ -47,10 +52,12 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
 }) => {
   const {
     patients,
+    doctors,
     advancePayments,
     receptionTokens,
     selectedPatientId,
     setSelectedPatientId,
+    updateReceptionTokenStatus,
     updatePatientStatus,
     updatePatient,
     addClinicalNote,
@@ -61,6 +68,7 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
     insuranceApprovals,
     addInsuranceApproval,
     recordEmergencyStabilization,
+    acknowledgeTokenDiagnosticResult,
     saveInsuranceAppealDraft,
     currentUser,
     currentRole,
@@ -69,7 +77,7 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [patientViewTab, setPatientViewTab] = useState<'dashboard' | 'previous' | 'notes' | 'prescriptions' | 'services' | 'reports' | 'insurance-card' | 'id-proof' | 'advances' | 'all'>('dashboard');
-  const [doctorWorkflowTokenId, setDoctorWorkflowTokenId] = useState<string | null>(null);
+  const [doctorQueueFilter, setDoctorQueueFilter] = useState<'All' | 'Waiting' | 'In Consultation' | 'Pending Results'>('All');
   const [selectedEncounterTokenId, setSelectedEncounterTokenId] = useState<string | null>(null);
   const [selectedHistoryTokenId, setSelectedHistoryTokenId] = useState<string | null>(null);
   const [historicalEmrTab, setHistoricalEmrTab] = useState<'doctor' | 'nurse' | 'lab' | 'erx' | 'medical' | 'documents'>('doctor');
@@ -95,10 +103,12 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   const [rxRoute, setRxRoute] = useState('Oral');
   const [rxDuration, setRxDuration] = useState('');
   const [rxInstructions, setRxInstructions] = useState('');
-  const [serviceName, setServiceName] = useState('');
-  const [serviceCategory, setServiceCategory] = useState<InsuranceApproval['serviceCategory']>('Procedure');
-  const [serviceCode, setServiceCode] = useState('');
-  const [serviceCost, setServiceCost] = useState('');
+  const [serviceQuantity, setServiceQuantity] = useState(1);
+  const [tariffSearchQuery, setTariffSearchQuery] = useState('');
+  const [tariffResults, setTariffResults] = useState<CptTariff[]>([]);
+  const [selectedTariff, setSelectedTariff] = useState<CptTariff | null>(null);
+  const [isSearchingTariffs, setIsSearchingTariffs] = useState(false);
+  const [tariffSearchError, setTariffSearchError] = useState('');
   const [serviceIcd10Code, setServiceIcd10Code] = useState('');
   const [servicePayerId, setServicePayerId] = useState('');
   const [serviceFacilityDhaLicense, setServiceFacilityDhaLicense] = useState(import.meta.env.VITE_FACILITY_DHA_LICENSE || '');
@@ -107,11 +117,48 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   const [serviceIsExcluded, setServiceIsExcluded] = useState(false);
   const [serviceIsPreExisting, setServiceIsPreExisting] = useState(false);
 
+  useEffect(() => {
+    const query = tariffSearchQuery.trim();
+    if (query.length < 2 || selectedTariff) {
+      setTariffResults([]);
+      setIsSearchingTariffs(false);
+      setTariffSearchError('');
+      return;
+    }
+    let isCurrent = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(async () => {
+      setIsSearchingTariffs(true);
+      setTariffSearchError('');
+      try {
+        const results = await searchCptTariffs(query, controller.signal);
+        if (isCurrent) setTariffResults(results);
+      } catch (error) {
+        if (!isCurrent || (error instanceof DOMException && error.name === 'AbortError')) return;
+        setTariffResults([]);
+        setTariffSearchError(error instanceof Error ? error.message : 'Tariff search failed.');
+      } finally {
+        if (isCurrent) setIsSearchingTariffs(false);
+      }
+    }, 250);
+
+    return () => {
+      isCurrent = false;
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [tariffSearchQuery, selectedTariff]);
+
   const normalizeClinicianName = (name: string) =>
     name.toLowerCase().replace(/^dr\.?\s*/, '').replace(/,?\s*(md|facs|do|phd)\b/g, '').replace(/[.,]/g, '').trim();
+  const loggedDoctorProfile = doctors.find((doctor) =>
+    doctor.id === currentUser.id ||
+    normalizeClinicianName(doctor.name) === normalizeClinicianName(currentUser.name)
+  );
   const isAssignedDoctorToken = (token: (typeof receptionTokens)[number]) =>
-    token.doctorId === currentUser.id ||
-    normalizeClinicianName(token.doctorName || '') === normalizeClinicianName(currentUser.name);
+    token.doctorId
+      ? token.doctorId === (loggedDoctorProfile?.id || currentUser.id)
+      : normalizeClinicianName(token.doctorName || '') === normalizeClinicianName(currentUser.name);
   const doctorVisitTokens = currentRole === 'doctor'
     ? receptionTokens.filter((token) => token.patientId !== 'WALK-IN' && isAssignedDoctorToken(token))
       .sort((first, second) =>
@@ -119,7 +166,24 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
         second.createdTime.localeCompare(first.createdTime)
       )
     : [];
+  const getDoctorQueueStatus = (token: (typeof receptionTokens)[number]): 'Waiting' | 'In Consultation' | 'Pending Results' => {
+    if (token.status === 'In Consultation' || token.currentStage === '3_DOCTOR_EMR') return 'In Consultation';
+    const diagnosticItems = (token.lineItems || []).filter((item) => ['Lab', 'Radiology', 'Procedure', 'Service'].includes(item.kind));
+    if (diagnosticItems.some((item) => item.executionStatus !== 'COMPLETED') ||
+      diagnosticItems.some((item) => item.executionStatus === 'COMPLETED' && !item.resultPayload?.acknowledgedAt)) {
+      return 'Pending Results';
+    }
+    return 'Waiting';
+  };
+  const activeDoctorQueue = doctorVisitTokens
+    .filter((token) => token.status !== 'Completed' && token.status !== 'Cancelled')
+    .filter((token) => doctorQueueFilter === 'All' || getDoctorQueueStatus(token) === doctorQueueFilter);
   const doctorPatientIds = new Set(doctorVisitTokens.map((token) => token.patientId));
+  const doctorResultInbox = doctorVisitTokens.flatMap((token) =>
+    (token.lineItems || [])
+      .filter((item) => item.executionStatus === 'COMPLETED' && item.resultPayload && !item.resultPayload.acknowledgedAt)
+      .map((item) => ({ token, item }))
+  );
   const assignedPatients = currentRole === 'doctor'
     ? patients.filter((patient) => doctorPatientIds.has(patient.id))
     : patients;
@@ -141,14 +205,57 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
   );
   const patientEncounterTokens = receptionTokens
     .filter((token) => token.patientId === selectedPatient?.id)
+    .filter((token) => currentRole !== 'doctor' || isAssignedDoctorToken(token))
     .sort((first, second) =>
       (second.visitDate || second.createdDate || '').localeCompare(first.visitDate || first.createdDate || '') ||
       second.createdTime.localeCompare(first.createdTime)
     );
+  const visitServiceRows = patientEncounterTokens.flatMap((token) =>
+    (token.lineItems || [])
+      .filter((item) => ['Consultation', 'Service', 'Lab', 'Radiology', 'Procedure'].includes(item.kind))
+      .map((item) => {
+        const patientService = (selectedPatient?.services || []).find((service) => service.id === item.id);
+        const isInvoiced = patientService?.billingStatus === 'Billed' ||
+          Boolean(
+            token.billingSummary?.invoiceNumber &&
+            ['Paid', 'SETTLED'].includes(token.billingSummary.paymentStatus) &&
+            token.billingSummary.items?.some((billItem) =>
+              billItem.id === item.id || billItem.sourceServiceId === item.id
+            )
+          );
+        return {
+          id: `${token.id}-${item.id}`,
+          token,
+          item,
+          patientService,
+          approval: insuranceApprovals.find((approval) =>
+            approval.id === patientService?.insuranceApprovalId || approval.serviceRecordId === item.id
+          ),
+          quantity: item.quantity || 1,
+          price: item.totalPrice,
+          unitPrice: item.unitPrice,
+          lineStatus: getEffectiveLineItemStatus(item),
+          billingBreakdown: getTokenLineItemBillingBreakdown(item),
+          isInvoiced,
+        };
+      })
+  );
+  const visitServiceTotals = visitServiceRows.reduce((totals, row) => ({
+    gross: totals.gross + Math.max(0, Number(row.price) || 0),
+    copay: totals.copay + row.billingBreakdown.copayAmount,
+    netClaim: totals.netClaim + row.billingBreakdown.insuranceCoveredAmount,
+  }), { gross: 0, copay: 0, netClaim: 0 });
+  const formatAed = (amount: number) => `AED ${amount.toLocaleString('en-AE', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
   const isNurseClinicalNote = (note: ClinicalNote) =>
     /nurse|nursing/i.test(`${note.authorRole || ''} ${note.doctorSpecialty || ''}`);
   const doctorClinicalNotes = patientNotes.filter((note) => !isNurseClinicalNote(note));
   const nurseClinicalNotes = patientNotes.filter(isNurseClinicalNote);
+  const patientTokenNursingNotes = patientEncounterTokens
+    .flatMap((token) => (token.nursingNotes || []).map((note) => ({ token, note })))
+    .sort((first, second) => second.note.recordedAt.localeCompare(first.note.recordedAt));
   const patientNursingNotes = patientEncounterTokens.filter((token) => token.vitals?.nursingNotes?.trim());
   const patientVitalsHistory = [...(selectedPatient?.vitals || [])].sort(
     (a, b) => new Date(b.recordedAt).getTime() - new Date(a.recordedAt).getTime()
@@ -192,44 +299,6 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
       (currentRole !== 'doctor' || isAssignedDoctorToken(token))
     )
     .sort((first, second) => second.createdTime.localeCompare(first.createdTime))[0];
-  const aiPromptTemplates = [
-    {
-      title: 'Clinical Documentation & SOAP Scribe',
-      description: 'Ambient or shorthand notes converted into a structured SOAP entry.',
-      prompt: 'You are an expert clinical documentation assistant for [Specialty] integrated into an EMR. Task: convert the provided encounter notes into a standard SOAP note. Input Data: [Paste clinical transcript / physician shorthand notes]. Output: Subjective, Objective, Assessment, Plan; flag missing critical details as [Needs Clarification: Detail]. Keep terminology precise and formatted as clean bullet points.',
-      tags: ['Role', 'Task', 'Context', 'Output Format'],
-    },
-    {
-      title: 'Chart Summarization & Handover',
-      description: 'Instant 30-second briefing for pre-visit reviews and handovers.',
-      prompt: 'You are an emergency and internal medicine chart summarizer. Task: review the patient history from the last [X months/years] and generate a concise 30-second pre-visit briefing. Input Data: [Patient History, Labs, and Previous Diagnoses]. Output: Active Conditions, Recent Changes, Alerts, and exclude stale resolved issues older than 2 years.',
-      tags: ['Role', 'Task', 'Context', 'Output Format'],
-    },
-    {
-      title: 'Diagnostic Support & Order Suggestions',
-      description: 'Clinical decision support without replacing physician judgment.',
-      prompt: 'You are a clinical decision support assistant. Task: analyze symptoms, labs, and patient background to suggest differentials and order sets. Input Data: [Current Encounter Details & Labs]. Output: top 3 differentials, one cannot-miss diagnosis, rationale, relevant tests or ICD-10/CPT drafts, and a mandatory reminder that all suggestions require physician review.',
-      tags: ['Role', 'Task', 'Context', 'Output Format'],
-    },
-  ];
-  const aiArchitecturePillars = [
-    {
-      title: 'Workflow & Usability',
-      text: 'Zero-click drafts, human-in-the-loop review, and voice-to-text / ambient listening support for fast and intuitive charting.',
-    },
-    {
-      title: 'Clinical Safety & Reliability',
-      text: 'Ground every recommendation in actual chart data, show explainability, and explicitly label missing information as Data not available instead of guessing.',
-    },
-    {
-      title: 'Security, Privacy & Compliance',
-      text: 'Use HIPAA/GDPR-safe processing, zero-retention enterprise APIs, BAA-compliant routing, and role-based access control for doctor, nurse, billing, and admin users.',
-    },
-    {
-      title: 'System Architecture & Interoperability',
-      text: 'Use HL7/FHIR data exchange and prioritize sub-2–3-second response times to keep documentation and chart review clinically viable.',
-    },
-  ];
   const patientAdvancePayments = advancePayments
     .filter((advance) => advance.patientId === selectedPatient?.id)
     .sort((first, second) =>
@@ -346,21 +415,54 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
     setIsAddingRx(false);
   };
 
-  const handleAddService = (event: React.FormEvent) => {
+  const handleAddService = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!selectedPatient || !serviceName.trim() || Number(serviceCost) <= 0) return;
+    if (!selectedPatient || !selectedTariff || serviceQuantity < 1) {
+      addNotification('Tariff Selection Required', 'Search and select an active CPT tariff before adding this service.', 'warning', selectedPatient?.id);
+      return;
+    }
+    if (!currentVisitToken) {
+      addNotification('Service Not Added', 'Select a visit token before adding a service so it is attached to the patient encounter.', 'warning', selectedPatient.id);
+      return;
+    }
+    const clinicId = import.meta.env.VITE_HMS_CLINIC_ID;
+    if (!clinicId) {
+      addNotification('Service Not Added', 'Configure the clinic ID and secure tariff service before adding priced services.', 'warning', selectedPatient.id);
+      return;
+    }
+    let ledgerItem;
+    try {
+      ledgerItem = await addCptTariffToVisit(
+        clinicId,
+        currentVisitToken.id,
+        selectedTariff.cpt_code,
+        serviceQuantity,
+        selectedTariff.standard_unit_price
+      );
+    } catch (error) {
+      addNotification(
+        'Service Not Added',
+        error instanceof Error ? error.message : 'The secure tariff service could not add this service.',
+        'warning',
+        selectedPatient.id
+      );
+      return;
+    }
+    const unitPrice = Number(ledgerItem.unitPrice);
+    const totalPrice = Number(ledgerItem.totalPrice);
+    const authoritativeCategory = ledgerItem.tariffCategory;
     const eligibilityClassification = classifyInsuranceEligibility({
       payerId: servicePayerId,
-      cptCode: serviceCode,
+      cptCode: ledgerItem.code,
       icd10Code: serviceIcd10Code,
       isExcluded: serviceIsExcluded,
       isPreExisting: serviceIsPreExisting,
     }, loadInsuranceCodeMappings());
     const service: PatientService = {
-      id: `SRV-${Date.now()}`,
-      name: serviceName.trim(),
-      category: serviceCategory,
-      serviceCode: serviceCode.trim() || undefined,
+      id: ledgerItem.id,
+      name: ledgerItem.name,
+      category: authoritativeCategory,
+      serviceCode: ledgerItem.code,
       icd10Code: serviceIcd10Code.trim() || undefined,
       payerId: servicePayerId.trim() || undefined,
       facilityDhaLicense: serviceFacilityDhaLicense.trim() || undefined,
@@ -369,41 +471,37 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
       eligibilityClassification,
       isExcluded: serviceIsExcluded,
       isPreExisting: serviceIsPreExisting,
-      estimatedCost: Number(serviceCost),
-      addedAt: new Date().toISOString(),
+      estimatedCost: totalPrice,
+      addedAt: ledgerItem.orderedAt,
       addedBy: currentUser.name,
       encounterTokenId: currentVisitToken?.id,
       billingStatus: 'Pending',
     };
+    const isSynchronized = service.encounterTokenId
+      ? addTokenLineItem(service.encounterTokenId, {
+          id: ledgerItem.id,
+          kind: ledgerItem.kind,
+          name: ledgerItem.name,
+          department: ledgerItem.department,
+          code: ledgerItem.code,
+          quantity: ledgerItem.quantity,
+          unitPrice,
+          totalPrice,
+          orderedBy: currentUser.name,
+          orderedAt: ledgerItem.orderedAt,
+          executionStatus: ledgerItem.kind === 'Consultation' ? undefined : 'PENDING_SETTLEMENT',
+        })
+      : false;
     updatePatient(selectedPatient.id, { services: [...patientServices, service] });
-    if (service.encounterTokenId) {
-      addTokenLineItem(service.encounterTokenId, {
-        id: service.id,
-        kind: service.category === 'Lab Test'
-          ? 'Lab'
-          : service.category === 'Radiology'
-            ? 'Radiology'
-            : service.category === 'Procedure'
-              ? 'Procedure'
-              : 'Service',
-        name: service.name,
-        department: service.category === 'Lab Test'
-          ? 'Laboratory'
-          : service.category === 'Radiology'
-            ? 'Radiology'
-            : currentUser.department,
-        code: service.serviceCode,
-        quantity: 1,
-        unitPrice: service.estimatedCost,
-        totalPrice: service.estimatedCost,
-        orderedBy: service.addedBy,
-        orderedAt: service.addedAt,
-      });
+    if (!isSynchronized) {
+      addNotification('Service Saved; Refresh Required', `${service.name} was added to the visit token, but the local chart did not refresh. Reload the chart before adding it again.`, 'warning', selectedPatient.id);
+      return;
     }
     addNotification('Patient Service Added', `${service.name} added to ${selectedPatient.firstName} ${selectedPatient.lastName}'s record.`, 'info', selectedPatient.id);
-    setServiceName('');
-    setServiceCode('');
-    setServiceCost('');
+    setServiceQuantity(1);
+    setSelectedTariff(null);
+    setTariffSearchQuery('');
+    setTariffResults([]);
     setServiceIcd10Code('');
     setServicePayerId('');
     setServiceClinicalRationale('');
@@ -598,8 +696,8 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
     <div className="mx-auto max-w-[1500px] space-y-4 p-3 sm:p-4 lg:p-5">
       <header className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-[10px] font-bold uppercase text-teal-700">Doctor EMR · registered visits</p>
-          <h2 className="text-lg font-bold text-slate-950">My registered patient visits</h2>
+          <p className="text-[10px] font-bold uppercase text-teal-700">Doctor EMR</p>
+          <h2 className="text-lg font-bold text-slate-950">Patient medical records</h2>
         </div>
         <button
           type="button"
@@ -612,43 +710,119 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
         </button>
       </header>
 
-      <section className="overflow-hidden rounded-xl border border-indigo-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between gap-3 border-b border-indigo-100 bg-indigo-50/70 p-3">
+      <section aria-labelledby="doctor-queue-heading" className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 p-3">
           <div>
-            <h3 className="text-xs font-bold uppercase tracking-wide text-indigo-950">Visits assigned to {currentUser.name}</h3>
-            <p className="mt-0.5 text-[10px] text-indigo-800">Use the registration token to document diagnoses, health summary, services, and medical reports.</p>
+            <h3 id="doctor-queue-heading" className="text-sm font-semibold text-slate-900">My active visits</h3>
+            <p className="mt-0.5 text-xs text-slate-600">Visit tokens assigned to your doctor account.</p>
           </div>
-          <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-indigo-800">{doctorVisitTokens.length} tokens</span>
+          <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">{activeDoctorQueue.length} active</span>
         </div>
-        {doctorVisitTokens.length ? (
-          <div className="flex gap-2 overflow-x-auto p-3">
-            {doctorVisitTokens.map((token) => (
-              <article key={token.id} className="min-w-64 rounded-lg border border-slate-200 bg-white p-2.5">
-                <button type="button" onClick={() => { setSelectedPatientId(token.patientId); setSelectedEncounterTokenId(token.id); }} className="w-full text-left">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded bg-teal-50 px-2 py-1 font-mono text-xs font-bold text-teal-800">{token.tokenNumber}</span>
-                    <span className="truncate text-xs font-bold text-slate-900">{token.patientName}</span>
+        <div className="flex flex-wrap gap-2 border-b border-slate-100 p-3">
+          {(['All', 'Waiting', 'In Consultation', 'Pending Results'] as const).map((status) => {
+            const count = doctorVisitTokens.filter((token) =>
+              token.status !== 'Completed' &&
+              token.status !== 'Cancelled' &&
+              (status === 'All' || getDoctorQueueStatus(token) === status)
+            ).length;
+            return (
+              <button
+                key={status}
+                type="button"
+                aria-pressed={doctorQueueFilter === status}
+                onClick={() => setDoctorQueueFilter(status)}
+                className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 focus-visible:ring-offset-2 ${
+                  doctorQueueFilter === status ? 'bg-teal-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {status} · {count}
+              </button>
+            );
+          })}
+        </div>
+        {activeDoctorQueue.length ? (
+          <div className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-3">
+            {activeDoctorQueue.map((token) => {
+              const status = getDoctorQueueStatus(token);
+              const badgeClass = status === 'Waiting'
+                ? 'bg-amber-100 text-amber-900'
+                : status === 'In Consultation'
+                  ? 'bg-sky-100 text-sky-900'
+                  : 'bg-violet-100 text-violet-900';
+              return (
+                <article key={token.id} className="rounded-lg border border-slate-200 p-3 transition hover:border-teal-300 hover:shadow-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-900">{token.patientName}</p>
+                      <p className="mt-1 text-xs text-slate-600">Token {token.tokenNumber} · {token.visitDate || token.createdDate}</p>
+                      <p className="text-xs text-slate-500">{token.department}</p>
+                    </div>
+                    <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold ${badgeClass}`}>{status}</span>
                   </div>
-                  <p className="mt-1 text-[10px] text-slate-600">{token.visitDate || token.createdDate} · {token.department}</p>
-                  <p className="mt-0.5 text-[10px] text-slate-500">{token.status} · {token.currentStage?.replaceAll('_', ' ') || 'Registration'}</p>
-                </button>
-                <button type="button" onClick={() => { setSelectedPatientId(token.patientId); setSelectedEncounterTokenId(token.id); setDoctorWorkflowTokenId(token.id); }} className="mt-2 w-full rounded-md bg-indigo-700 px-2.5 py-1.5 text-[10px] font-bold text-white hover:bg-indigo-800">
-                  Open Doctor EMR · {token.tokenNumber}
-                </button>
-              </article>
-            ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedPatientId(token.patientId);
+                      setSelectedEncounterTokenId(token.id);
+                      if (status === 'Waiting') updateReceptionTokenStatus(token.id, 'In Consultation');
+                      setPatientViewTab('dashboard');
+                    }}
+                    className="mt-3 min-h-10 w-full rounded-lg bg-teal-800 px-3 py-2 text-xs font-semibold text-white transition hover:bg-teal-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 focus-visible:ring-offset-2"
+                  >
+                    Open patient chart
+                  </button>
+                </article>
+              );
+            })}
           </div>
         ) : (
-          <p className="p-4 text-xs text-slate-500">No patient registration tokens are assigned to you.</p>
+          <p className="p-5 text-center text-xs text-slate-500">No active visit tokens match this queue filter.</p>
         )}
       </section>
 
-      <TokenWorkflowModal
-        token={receptionTokens.find((token) => token.id === doctorWorkflowTokenId) || null}
-        isOpen={Boolean(doctorWorkflowTokenId)}
-        initialStage="3_DOCTOR_EMR"
-        onClose={() => setDoctorWorkflowTokenId(null)}
-      />
+      {doctorResultInbox.length > 0 && <section aria-labelledby="results-inbox-heading" className="overflow-hidden rounded-xl border border-amber-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between gap-3 border-b border-amber-100 bg-amber-50/70 p-3">
+          <div>
+            <h3 id="results-inbox-heading" className="text-sm font-semibold text-amber-950">Results awaiting review</h3>
+            <p className="mt-0.5 text-xs text-amber-800">New results for your encounters. Open the patient report to review the full record.</p>
+          </div>
+          <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-amber-800">{doctorResultInbox.length} to review</span>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {doctorResultInbox.map(({ token, item }) => (
+            <article key={`${token.id}-${item.id}`} className="flex flex-col justify-between gap-3 p-3 sm:flex-row sm:items-center">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-900">{item.name}</p>
+                <p className="mt-0.5 text-xs text-slate-600">{token.patientName} · Token {token.tokenNumber} · {token.visitDate || token.createdDate}</p>
+                <p className="mt-1 truncate text-xs text-slate-700">
+                  {item.resultPayload?.value || item.resultPayload?.impression || item.resultPayload?.findings || 'Result submitted'}
+                  {item.resultPayload?.submittedAt && ` · ${new Date(item.resultPayload.submittedAt).toLocaleString()}`}
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedPatientId(token.patientId);
+                    setPatientViewTab('reports');
+                    setSelectedEncounterTokenId(token.id);
+                  }}
+                  className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 focus-visible:ring-offset-2"
+                >
+                  Open patient report
+                </button>
+                <button
+                  type="button"
+                  onClick={() => acknowledgeTokenDiagnosticResult(token.id, item.id)}
+                  className="min-h-10 rounded-lg bg-teal-800 px-3 py-2 text-xs font-semibold text-white transition hover:bg-teal-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 focus-visible:ring-offset-2"
+                >
+                  Mark reviewed
+                </button>
+              </div>
+              </article>
+          ))}
+        </div>
+      </section>}
 
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
         {/* Left Column: Patient Registry List */}
@@ -771,46 +945,6 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
         {/* Right Column: Detailed Patient EMR Dossier */}
         {selectedPatient ? (
           <div className="min-w-0 space-y-3 lg:col-span-9">
-            <details className="overflow-hidden rounded-xl border border-violet-200 bg-gradient-to-br from-violet-50 via-white to-indigo-50 shadow-sm">
-              <summary className="cursor-pointer border-b border-violet-200 bg-violet-50/80 p-4 marker:text-violet-700">
-                <span className="ml-1 text-[10px] font-bold uppercase text-violet-700">AI prompt &amp; safety reference</span>
-                <span className="ml-3 text-xs font-semibold text-slate-700">Prompt templates, privacy, clinical review, and interoperability</span>
-              </summary>
-
-              <div className="grid grid-cols-1 gap-4 p-4 xl:grid-cols-3">
-                {aiPromptTemplates.map((template) => (
-                  <article key={template.title} className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <h4 className="text-xs font-bold text-slate-900">{template.title}</h4>
-                      <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[9px] font-bold uppercase text-violet-700">{template.tags.join(' · ')}</span>
-                    </div>
-                    <p className="text-[11px] text-slate-600">{template.description}</p>
-                    <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2">
-                      <p className="text-[10px] leading-relaxed text-slate-700">{template.prompt}</p>
-                    </div>
-                  </article>
-                ))}
-              </div>
-
-              <div className="border-t border-violet-200 bg-violet-50/60 p-4">
-                <div className="mb-3">
-                  <p className="text-[10px] font-bold uppercase tracking-wide text-violet-700">Core implementation pillars</p>
-                  <h4 className="text-sm font-bold text-slate-900">What makes the AI system usable, fast, and trustworthy</h4>
-                </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  {aiArchitecturePillars.map((pillar) => (
-                    <div key={pillar.title} className="rounded-lg border border-slate-200 bg-white p-3">
-                      <div className="mb-1 flex items-center gap-2">
-                        <span className="inline-flex h-2.5 w-2.5 rounded-full bg-violet-600" />
-                        <h5 className="text-xs font-bold text-slate-900">{pillar.title}</h5>
-                      </div>
-                      <p className="text-[11px] leading-relaxed text-slate-600">{pillar.text}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </details>
-
             {/* EMR Sub-Navigation Tabs */}
             <nav aria-label="Patient record sections" className="flex items-center gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-sm [&>button]:shrink-0 [&>button]:whitespace-nowrap">
                 <button
@@ -883,22 +1017,6 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                   <span>Facility &amp; insurance ({patientServices.length})</span>
                 </button>
 
-                {canViewPatientBilling && (
-                  <button
-                    type="button"
-                    aria-pressed={patientViewTab === 'advances'}
-                    onClick={() => setPatientViewTab('advances')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-                      patientViewTab === 'advances'
-                        ? 'bg-teal-700 text-white shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-                    }`}
-                  >
-                    <CircleDollarSign className="w-3.5 h-3.5" />
-                    <span>Advances ({patientAdvancePayments.length})</span>
-                  </button>
-                )}
-
                 <button
                   type="button"
                   aria-pressed={patientViewTab === 'reports'}
@@ -940,6 +1058,22 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                   <FileText className="w-3.5 h-3.5" />
                   <span>ID Proof</span>
                 </button>
+
+                {canViewPatientBilling && (
+                  <button
+                    type="button"
+                    aria-pressed={patientViewTab === 'advances'}
+                    onClick={() => setPatientViewTab('advances')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      patientViewTab === 'advances'
+                        ? 'bg-teal-700 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                    }`}
+                  >
+                    <CircleDollarSign className="w-3.5 h-3.5" />
+                    <span>Advances ({patientAdvancePayments.length})</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
@@ -1036,7 +1170,7 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                 <div className="mb-4 flex flex-col justify-between gap-2 border-b border-slate-100 pb-3 sm:flex-row sm:items-center">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">Facility Services &amp; Insurance Authorizations</h3>
-                    <p className="mt-0.5 text-xs text-slate-500">Record facility care and request payer pre-authorization for medical coder review.</p>
+                    <p className="mt-0.5 text-xs text-slate-500">Add services to the selected visit and request authorization for each eligible service.</p>
                   </div>
                   <div className="flex flex-wrap gap-2 text-[10px] font-semibold">
                     <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">{patientServices.length} services</span>
@@ -1045,38 +1179,214 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                   </div>
                 </div>
 
-                <form onSubmit={handleAddService} className="mb-4 grid grid-cols-1 gap-2 rounded-lg bg-slate-50 p-3 sm:grid-cols-2 xl:grid-cols-4">
-                  <label className="text-[11px] font-semibold text-slate-700 sm:col-span-2 xl:col-span-1">
-                    Service name
-                    <input required value={serviceName} onChange={(event) => setServiceName(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="e.g. MRI Knee" />
-                  </label>
-                  <label className="text-[11px] font-semibold text-slate-700">
-                    Category
-                    <select value={serviceCategory} onChange={(event) => setServiceCategory(event.target.value as InsuranceApproval['serviceCategory'])} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal">
-                      {(['Procedure', 'Lab Test', 'Radiology', 'Consultation', 'IPD Admission'] as const).map((category) => <option key={category} value={category}>{category}</option>)}
+                <div className="mb-4 flex flex-col gap-2 rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 sm:flex-row sm:items-end sm:justify-between">
+                  <label className="min-w-0 flex-1 text-[11px] font-semibold text-indigo-950">
+                    Visit token for service orders
+                    <select
+                      value={currentVisitToken?.id || ''}
+                      onChange={(event) => setSelectedEncounterTokenId(event.target.value || null)}
+                      disabled={patientEncounterTokens.length === 0}
+                      className="mt-1 w-full rounded-md border border-indigo-200 bg-white px-2.5 py-2 text-xs font-normal text-slate-800 disabled:bg-slate-100"
+                    >
+                      {patientEncounterTokens.length === 0 && <option value="">No visit token available</option>}
+                      {patientEncounterTokens.map((token) => (
+                        <option key={token.id} value={token.id}>
+                          Token {token.tokenNumber} · {token.visitDate || token.createdDate} · {token.status}
+                        </option>
+                      ))}
                     </select>
                   </label>
-                  <label className="text-[11px] font-semibold text-slate-700">
+                  {currentVisitToken && (
+                    <p className="shrink-0 text-xs font-medium text-indigo-800">
+                      Services will be added to Token {currentVisitToken.tokenNumber}
+                    </p>
+                  )}
+                </div>
+
+                <div className="mb-4 overflow-hidden rounded-lg border border-blue-950">
+                  <div className="border-b border-slate-200 bg-slate-50 px-3 py-3">
+                    <h4 className="text-sm font-semibold text-slate-900">Visit services and claim summary</h4>
+                    <p className="mt-0.5 text-xs text-slate-600">Amounts and authorization status are shown per token line item. Pending authorization is not included in the net claim total.</p>
+                  </div>
+                  {visitServiceRows.length === 0 ? (
+                    <p className="px-3 py-8 text-center text-xs text-slate-600">No services are attached to this patient’s visits.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[1420px] text-left text-xs">
+                        <thead className="bg-slate-100 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                          <tr>
+                            <th className="whitespace-nowrap px-3 py-2.5">Sr. No.</th>
+                            <th className="whitespace-nowrap px-3 py-2.5">CPT / Code</th>
+                            <th className="px-3 py-2.5">Description</th>
+                            <th className="px-3 py-2.5 text-right">Qty</th>
+                            <th className="whitespace-nowrap px-3 py-2.5 text-right">Unit Price (AED)</th>
+                            <th className="whitespace-nowrap px-3 py-2.5 text-right">Gross Total (AED)</th>
+                            <th className="whitespace-nowrap px-3 py-2.5 text-right">Patient Copay (AED)</th>
+                            <th className="whitespace-nowrap px-3 py-2.5 text-right">Net Claim (AED)</th>
+                            <th className="px-3 py-2.5">Line Status</th>
+                            <th className="px-3 py-2.5">Authorization</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white text-slate-800">
+                          {visitServiceRows.map(({ id, token, item, patientService, approval, quantity, price, unitPrice, lineStatus, billingBreakdown, isInvoiced }, index) => (
+                            <tr key={id} className="hover:bg-slate-50">
+                              <td className="whitespace-nowrap px-3 py-3 font-mono text-slate-500">{String(index + 1).padStart(2, '0')}</td>
+                              <td className="whitespace-nowrap px-3 py-3 font-mono font-medium">{item.code || '—'}</td>
+                              <td className="px-3 py-2.5">
+                                <p className="font-medium">{item.name}</p>
+                                <p className="mt-0.5 text-[10px] text-slate-500">{item.kind} · Token {token.tokenNumber} · {token.visitDate || token.createdDate}</p>
+                              </td>
+                              <td className="px-3 py-2.5 text-right font-mono">{quantity}</td>
+                              <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">{formatAed(Number(unitPrice) || 0)}</td>
+                              <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono font-medium">{formatAed(Number(price) || 0)}</td>
+                              <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">{formatAed(billingBreakdown.copayAmount)}</td>
+                              <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">{formatAed(billingBreakdown.insuranceCoveredAmount)}</td>
+                              <td className="px-3 py-2.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                                    lineStatus === 'Approved' || lineStatus === 'Self_Pay'
+                                      ? 'bg-emerald-50 text-emerald-800'
+                                      : lineStatus === 'Denied'
+                                        ? 'bg-rose-50 text-rose-800'
+                                        : lineStatus === 'Partially_Approved'
+                                          ? 'bg-sky-50 text-sky-800'
+                                          : 'bg-amber-50 text-amber-800'
+                                  }`}>{lineStatus.replaceAll('_', ' ')}</span>
+                                  {isInvoiced && (
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[9px] font-medium text-slate-700">
+                                      <CircleCheck className="h-3 w-3" /> Invoiced
+                                    </span>
+                                  )}
+                                  {item.executionStatus === 'COMPLETED' && <span className="text-[10px] text-teal-700">Result available</span>}
+                                  {item.executionStatus === 'READY_FOR_EXECUTION' && <span className="text-[10px] text-sky-700">Ready for execution</span>}
+                                </div>
+                              </td>
+                              <td className="px-3 py-2.5">
+                                {approval && !['Rejected'].includes(approval.approvalStatus) ? (
+                                  <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                                    approval.approvalStatus === 'Approved'
+                                      ? 'bg-emerald-100 text-emerald-900'
+                                      : approval.approvalStatus === 'Pending'
+                                        ? 'bg-amber-100 text-amber-900'
+                                        : 'bg-slate-100 text-slate-700'
+                                  }`}>
+                                    {approval.approvalStatus}
+                                  </span>
+                                ) : patientService ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRequestServiceAuthorization(patientService)}
+                                    className="min-h-8 whitespace-nowrap rounded-md border border-teal-200 bg-teal-50 px-2.5 py-1.5 text-[10px] font-semibold text-teal-900 transition hover:bg-teal-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600 focus-visible:ring-offset-1"
+                                  >
+                                    {approval?.approvalStatus === 'Rejected' ? 'Request again' : 'Request authorization'}
+                                  </button>
+                                ) : (
+                                  <span className="text-[10px] text-slate-400">Not available</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="border-t-2 border-slate-200 bg-slate-50 text-xs font-semibold text-slate-900">
+                          <tr>
+                            <td className="px-3 py-3" colSpan={5}>TOTALS</td>
+                            <td className="whitespace-nowrap px-3 py-3 text-right font-mono">{formatAed(visitServiceTotals.gross)}</td>
+                            <td className="whitespace-nowrap px-3 py-3 text-right font-mono">{formatAed(visitServiceTotals.copay)}</td>
+                            <td className="whitespace-nowrap px-3 py-3 text-right font-mono">{formatAed(visitServiceTotals.netClaim)}</td>
+                            <td colSpan={2} />
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <form onSubmit={handleAddService} className="mb-4 flex w-full flex-col gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <div className="relative">
+                    <label htmlFor="cpt-tariff-search" className="text-xs font-semibold text-slate-700">
+                      Search approved facility CPT tariff
+                    </label>
+                    <input
+                      id="cpt-tariff-search"
+                      type="search"
+                      autoComplete="off"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-expanded={!selectedTariff && tariffResults.length > 0}
+                      aria-controls="cpt-tariff-suggestions"
+                      value={tariffSearchQuery}
+                      onChange={(event) => {
+                        setTariffSearchQuery(event.target.value);
+                        setSelectedTariff(null);
+                      }}
+                      className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-sm font-normal focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-100"
+                      placeholder="Enter at least 2 characters of a CPT code or service"
+                    />
+                    {isSearchingTariffs && <p className="mt-1 text-xs text-slate-500" role="status">Searching active tariffs…</p>}
+                    {tariffSearchError && <p className="mt-1 text-xs text-rose-700" role="alert">{tariffSearchError}</p>}
+                    {tariffSearchQuery.trim().length === 1 && <p className="mt-1 text-xs text-slate-500">Type one more character to search.</p>}
+                    {!selectedTariff && !isSearchingTariffs && tariffSearchQuery.trim().length >= 2 && !tariffSearchError && tariffResults.length === 0 && (
+                      <p className="mt-1 text-xs text-slate-500">No active CPT tariffs found.</p>
+                    )}
+                    {!selectedTariff && tariffResults.length > 0 && (
+                      <ul id="cpt-tariff-suggestions" role="listbox" className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
+                        {tariffResults.map((tariff) => (
+                          <li key={tariff.cpt_code} role="option" aria-selected={false}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedTariff(tariff);
+                                setTariffSearchQuery(`${tariff.cpt_code} · ${tariff.description}`);
+                                setTariffResults([]);
+                              }}
+                              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-teal-50 focus:bg-teal-50 focus:outline-none"
+                            >
+                              <span className="min-w-0">
+                                <span className="block font-mono text-xs font-semibold text-slate-900">{tariff.cpt_code}</span>
+                                <span className="block truncate text-xs text-slate-600">{tariff.description} · {tariff.category}</span>
+                              </span>
+                              <span className="shrink-0 text-xs font-semibold text-slate-900">{formatAed(tariff.standard_unit_price)}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <label className="text-xs font-semibold text-slate-700">
+                    Description
+                    <input readOnly value={selectedTariff?.description || ''} className="mt-1 block w-full rounded-md border border-slate-200 bg-slate-100 px-2.5 py-2 text-xs font-normal text-slate-700" placeholder="Select an active CPT tariff" />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-700">
                     CPT / service code
-                    <input value={serviceCode} onChange={(event) => setServiceCode(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Required for authorization" />
+                    <input readOnly value={selectedTariff?.cpt_code || ''} className="mt-1 block w-full rounded-md border border-slate-200 bg-slate-100 px-2.5 py-2 font-mono text-xs font-normal text-slate-700" placeholder="Selected from tariff master" />
                   </label>
-                  <label className="text-[11px] font-semibold text-slate-700">
-                    Estimated cost (AED)
-                    <input required type="number" min="0.01" step="0.01" value={serviceCost} onChange={(event) => setServiceCost(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" />
+                  <label className="text-xs font-semibold text-slate-700">
+                    Unit price (AED) · tariff controlled
+                    <input readOnly disabled value={selectedTariff ? selectedTariff.standard_unit_price.toFixed(2) : ''} className="mt-1 block w-full rounded-md border border-slate-200 bg-slate-100 px-2.5 py-2 text-xs font-semibold text-slate-700 disabled:cursor-not-allowed" placeholder="Select a tariff" />
                   </label>
-                  <label className="text-[11px] font-semibold text-slate-700">
+                  <label className="text-xs font-semibold text-slate-700">
+                    Quantity
+                    <input required type="number" min="1" max="999" step="1" value={serviceQuantity} onChange={(event) => setServiceQuantity(Math.max(1, Math.min(999, Number(event.target.value) || 1)))} className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" />
+                  </label>
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs">
+                    <span className="font-semibold text-slate-600">Gross total</span>
+                    <span className="float-right font-mono font-bold text-slate-900">
+                      {formatAed(selectedTariff ? selectedTariff.standard_unit_price * serviceQuantity : 0)}
+                    </span>
+                  </div>
+                  <label className="text-xs font-semibold text-slate-700">
                     ICD-10 diagnosis code
                     <input value={serviceIcd10Code} onChange={(event) => setServiceIcd10Code(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Link the supporting diagnosis" />
                   </label>
-                  <label className="text-[11px] font-semibold text-slate-700">
+                  <label className="text-xs font-semibold text-slate-700">
                     Payer ID
                     <input value={servicePayerId} onChange={(event) => setServicePayerId(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Payer identifier" />
                   </label>
-                  <label className="text-[11px] font-semibold text-slate-700">
+                  <label className="text-xs font-semibold text-slate-700">
                     Facility DHA License
                     <input value={serviceFacilityDhaLicense} onChange={(event) => setServiceFacilityDhaLicense(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Required for authorization" />
                   </label>
-                  <label className="text-[11px] font-semibold text-slate-700">
+                  <label className="text-xs font-semibold text-slate-700">
                     Request pathway
                     <select value={serviceRequestType} onChange={(event) => setServiceRequestType(event.target.value as NonNullable<InsuranceApproval['requestType']>)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal">
                       <option value="Elective Outpatient">Elective outpatient · 6-hour target</option>
@@ -1084,11 +1394,11 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                       <option value="Emergency">Emergency waiver · immediate treatment</option>
                     </select>
                   </label>
-                  <label className="text-[11px] font-semibold text-slate-700 sm:col-span-2">
+                  <label className="text-xs font-semibold text-slate-700">
                     Clinical rationale
-                    <textarea value={serviceClinicalRationale} onChange={(event) => setServiceClinicalRationale(event.target.value)} rows={2} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Indication, relevant history, and medical necessity" />
+                    <input type="text" value={serviceClinicalRationale} onChange={(event) => setServiceClinicalRationale(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-xs font-normal" placeholder="Indication, relevant history, and medical necessity" />
                   </label>
-                  <div className="flex flex-col justify-center gap-2 text-[11px] sm:col-span-2">
+                  <div className="flex flex-col gap-2 text-xs">
                     <label className="flex items-center gap-2 font-medium text-slate-700">
                       <input type="checkbox" checked={serviceIsExcluded} onChange={(event) => setServiceIsExcluded(event.target.checked)} />
                       Payer policy identifies service as excluded
@@ -1098,9 +1408,9 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                       Documented pre-existing condition / waiting period applies
                     </label>
                   </div>
-                  <div className="flex items-end sm:col-span-2 xl:col-span-1">
-                    <button type="submit" className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-blue-700 px-3 py-2 text-xs font-bold text-white hover:bg-blue-800">
-                      <Plus className="h-3.5 w-3.5" /> Add service
+                  <div>
+                    <button type="submit" disabled={!currentVisitToken || !selectedTariff} className="inline-flex min-h-10 w-full items-center justify-center gap-1.5 rounded-md bg-teal-800 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-900 disabled:cursor-not-allowed disabled:opacity-50">
+                      <Plus className="h-3.5 w-3.5" /> Add to ledger
                     </button>
                   </div>
                 </form>
@@ -1224,109 +1534,14 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
 
             {/* TAB 1: PATIENT DASHBOARD (Health Trends, Lab Results, Upcoming Appointments) */}
             {(patientViewTab === 'dashboard' || patientViewTab === 'all') && (
-              <>
-                <PatientDashboard
-                  patient={selectedPatient}
-                  onOpenTriageModal={onOpenTriageModal}
-                  onStartTelehealth={onStartTelehealth}
-                  onNavigateToNotes={() => setPatientViewTab('notes')}
-                  onNavigateToPrescriptions={() => setPatientViewTab('prescriptions')}
-                  onNavigateToReports={() => setPatientViewTab('reports')}
-                />
-
-                {patientViewTab === 'dashboard' && (
-                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-                    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                      <div className="mb-3 flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
-                        <div className="flex items-center gap-2">
-                          <FlaskConical className="h-4 w-4 text-teal-700" />
-                          <h3 className="text-sm font-bold text-slate-900">Lab & Radiology</h3>
-                        </div>
-                        <button type="button" onClick={() => setPatientViewTab('reports')} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
-                          All reports
-                        </button>
-                      </div>
-                      {selectedPatient.labResults.length === 0 ? (
-                        <p className="py-3 text-xs text-slate-500">No lab or radiology reports recorded.</p>
-                      ) : (
-                        <div className="divide-y divide-slate-100">
-                          {[...selectedPatient.labResults]
-                            .sort((a, b) => (b.resultDate || b.orderedDate).localeCompare(a.resultDate || a.orderedDate))
-                            .slice(0, 4)
-                            .map((report) => (
-                              <div key={report.id} className="py-2 first:pt-0 last:pb-0">
-                                <div className="flex items-start justify-between gap-2">
-                                  <p className="text-xs font-semibold text-slate-900">{report.testName}</p>
-                                  <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">{report.status}</span>
-                                </div>
-                                <p className="mt-0.5 text-[11px] text-slate-500">{report.department || report.category} · {report.resultDate || report.orderedDate}</p>
-                                <p className="mt-0.5 text-xs text-slate-700">{report.impression || report.findings || report.value}</p>
-                              </div>
-                            ))}
-                        </div>
-                      )}
-                    </section>
-
-                    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                      <div className="mb-3 flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
-                        <div className="flex items-center gap-2">
-                          <Pill className="h-4 w-4 text-emerald-700" />
-                          <h3 className="text-sm font-bold text-slate-900">Prescriptions</h3>
-                        </div>
-                        <button type="button" onClick={() => setPatientViewTab('prescriptions')} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
-                          Manage
-                        </button>
-                      </div>
-                      {patientPrescriptions.length === 0 ? (
-                        <p className="py-3 text-xs text-slate-500">No prescriptions recorded.</p>
-                      ) : (
-                        <div className="divide-y divide-slate-100">
-                          {patientPrescriptions.slice(0, 4).map((prescription, index) => (
-                            <div key={prescription.id || `${prescription.medicationName}-${index}`} className="py-2 first:pt-0 last:pb-0">
-                              <div className="flex items-start justify-between gap-2">
-                                <p className="text-xs font-semibold text-slate-900">{prescription.medicationName}</p>
-                                <span className="text-[10px] font-semibold text-emerald-700">{prescription.status || 'Active'}</span>
-                              </div>
-                              <p className="mt-0.5 text-[11px] text-slate-600">{prescription.dosage} · {prescription.frequency} · {prescription.duration || 'Ongoing'}</p>
-                              {prescription.instructions && <p className="mt-0.5 text-[11px] text-slate-500">{prescription.instructions}</p>}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </section>
-
-                    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                      <div className="mb-3 flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
-                        <div className="flex items-center gap-2">
-                          <FileText className="h-4 w-4 text-teal-700" />
-                          <h3 className="text-sm font-bold text-slate-900">Medical Reports</h3>
-                        </div>
-                        <button type="button" onClick={() => setPatientViewTab('notes')} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
-                          All notes
-                        </button>
-                      </div>
-                      {patientNotes.length === 0 ? (
-                        <p className="py-3 text-xs text-slate-500">No medical reports or clinical notes recorded.</p>
-                      ) : (
-                        <div className="divide-y divide-slate-100">
-                          {patientNotes.slice(0, 3).map((note) => (
-                            <div key={note.id} className="py-2 first:pt-0 last:pb-0">
-                              <div className="flex items-start justify-between gap-2">
-                                <p className="text-xs font-semibold text-slate-900">{note.chiefComplaint || note.category || 'Clinical report'}</p>
-                                <span className="shrink-0 text-[10px] text-slate-500">{note.date}</span>
-                              </div>
-                              <p className="mt-0.5 text-[11px] text-slate-700">{note.assessment || note.content || 'Report recorded.'}</p>
-                              {(note.diagnoses?.length || note.diagnosisCode) && (
-                                <p className="mt-0.5 text-[10px] font-medium text-teal-800">Diagnosis: {note.diagnoses?.join(', ') || note.diagnosisCode}</p>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </section>
-                  </div>
-                )}
-              </>
+              <PatientDashboard
+                patient={selectedPatient}
+                onOpenTriageModal={onOpenTriageModal}
+                onStartTelehealth={onStartTelehealth}
+                onNavigateToNotes={() => setPatientViewTab('notes')}
+                onNavigateToPrescriptions={() => setPatientViewTab('prescriptions')}
+                onNavigateToReports={() => setPatientViewTab('reports')}
+              />
             )}
 
             {/* TAB: DIAGNOSTIC & CLINICAL REPORTS (DATE & DEPARTMENT-WISE) */}
@@ -1658,6 +1873,11 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                                     <p className="font-semibold text-slate-900">{report.testName} · {report.status}</p>
                                     <p className="mt-0.5 text-[10px] text-slate-500">{report.department || report.category} · Ordered {report.orderedDate} · Result {report.resultDate || 'pending'} · Dr. {report.orderedBy}</p>
                                     <p className="mt-1 text-slate-700">{report.impression || report.findings || report.value || 'No result detail recorded.'}</p>
+                                    {report.reportFiles?.map((file) => (
+                                      <a key={file.id} href={file.dataUrl} download={file.fileName} className="mr-3 mt-2 inline-flex text-[10px] font-semibold text-indigo-700 underline">
+                                        View {file.fileName}
+                                      </a>
+                                    ))}
                                   </article>
                                 ))}
                                 {selectedHistoryToken.diagnosticReports?.map((report) => (
@@ -1665,6 +1885,11 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                                     <p className="font-semibold text-slate-900">{report.testOrStudyName} · {report.status}</p>
                                     <p className="mt-0.5 text-[10px] text-slate-500">{report.department} · {report.date}{report.time ? ` ${report.time}` : ''} · {report.technicianOrRadiologist}</p>
                                     <p className="mt-1 text-slate-700">{report.impression || report.findings || 'No report detail recorded.'}</p>
+                                    {report.reportFiles?.map((file) => (
+                                      <a key={file.id} href={file.dataUrl} download={file.fileName} className="mr-3 mt-2 inline-flex text-[10px] font-semibold text-indigo-700 underline">
+                                        View {file.fileName}
+                                      </a>
+                                    ))}
                                   </article>
                                 ))}
                               </div>
@@ -2014,6 +2239,15 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                       {note.treatmentPlan && <p className="mt-1 text-slate-600"><strong>Follow-up:</strong> {note.treatmentPlan}</p>}
                     </article>
                   ))}
+                  {patientTokenNursingNotes.map(({ token, note }) => (
+                    <article key={note.id} className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 text-xs">
+                      <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                        <span className="font-bold text-slate-800">{note.nurseName} · Token {token.tokenNumber}</span>
+                        <time className="font-mono">{new Date(note.recordedAt).toLocaleString()}</time>
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap text-slate-700">{note.note}</p>
+                    </article>
+                  ))}
                   {patientNursingNotes.map((token) => (
                     <article key={token.id} className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 text-xs">
                       <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
@@ -2021,10 +2255,9 @@ export const PatientsEMR: React.FC<PatientsEMRProps> = ({
                         <time className="font-mono">{token.vitals?.recordedAt ? new Date(token.vitals.recordedAt).toLocaleString() : token.visitDate || token.createdDate}</time>
                       </div>
                       <p className="mt-2 whitespace-pre-wrap text-slate-700">{token.vitals?.nursingNotes}</p>
-                      <p className="mt-1 text-[10px] text-slate-500">BP {token.vitals?.bpSystolic}/{token.vitals?.bpDiastolic} · HR {token.vitals?.heartRate} · SpO2 {token.vitals?.spO2}% · {token.vitals?.triageLevel}</p>
                     </article>
                   ))}
-                  {nurseClinicalNotes.length === 0 && patientNursingNotes.length === 0 && (
+                  {nurseClinicalNotes.length === 0 && patientTokenNursingNotes.length === 0 && patientNursingNotes.length === 0 && (
                     <p className="py-4 text-center text-xs text-slate-400">No nurse notes recorded yet.</p>
                   )}
                 </div>

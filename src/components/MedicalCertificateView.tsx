@@ -23,6 +23,7 @@ export const MedicalCertificateView: React.FC = () => {
   const {
     patients,
     doctors,
+    receptionTokens,
     medicalCertificates,
     issueMedicalCertificate,
     revokeMedicalCertificate,
@@ -39,6 +40,7 @@ export const MedicalCertificateView: React.FC = () => {
 
   // Form State
   const [patientId, setPatientId] = useState(patients[0]?.id || '');
+  const [encounterTokenId, setEncounterTokenId] = useState('');
   const [certType, setCertType] = useState<CertificateType>('Sick Leave Attestation');
   const [selectedIcd, setSelectedIcd] = useState(ICD10_COMMON_CODES[0]?.code || 'I10');
   const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -65,6 +67,7 @@ export const MedicalCertificateView: React.FC = () => {
   ];
 
   const selectedPatient = patients.find((p) => p.id === patientId) || patients[0];
+  const patientVisitTokens = receptionTokens.filter((token) => token.patientId === patientId);
   const selectedDoctor = doctors.find((d) => d.id === doctorId) || doctors[0];
   const selectedDiagnosisObj = ICD10_COMMON_CODES.find((c) => c.code === selectedIcd) || {
     code: selectedIcd,
@@ -118,6 +121,7 @@ export const MedicalCertificateView: React.FC = () => {
 
     const cert = issueMedicalCertificate({
       patientId: selectedPatient.id,
+      ...(encounterTokenId ? { encounterTokenId } : {}),
       patientName: `${selectedPatient.firstName} ${selectedPatient.lastName}`,
       patientMrn: selectedPatient.rgNo || selectedPatient.id,
       patientDob: selectedPatient.dob,
@@ -406,13 +410,31 @@ export const MedicalCertificateView: React.FC = () => {
                   <label className="block font-bold text-slate-700 mb-1">Select Patient *</label>
                   <select
                     value={patientId}
-                    onChange={(e) => setPatientId(e.target.value)}
+                    onChange={(e) => {
+                      setPatientId(e.target.value);
+                      setEncounterTokenId('');
+                    }}
                     className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2 text-xs font-medium"
                     required
                   >
                     {patients.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.firstName} {p.lastName} (MRN: {p.rgNo || p.id}) — {p.age}y {p.gender}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Visit token (for encounter-linked records)</label>
+                  <select
+                    value={encounterTokenId}
+                    onChange={(e) => setEncounterTokenId(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2 text-xs font-medium"
+                  >
+                    <option value="">Not linked to a specific visit</option>
+                    {patientVisitTokens.map((token) => (
+                      <option key={token.id} value={token.id}>
+                        {token.tokenNumber} · {token.visitDate || token.createdDate} · {token.department}
                       </option>
                     ))}
                   </select>

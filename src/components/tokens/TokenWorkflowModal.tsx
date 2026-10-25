@@ -37,9 +37,12 @@ import {
   BillItem,
 } from '../../types';
 import { applyInsuranceBreakdown, sumInvoiceItemField } from '../../utils/insuranceInvoice';
+import { ICD10_COMMON_CODES } from '../../data/icd10Codes';
 import {
   aggregateTokenLineItemBilling,
   appendTokenLineItems,
+  canExecuteSettledService,
+  canRoleExecuteServiceLineItem,
   createDoctorOrderLineItems,
   createServiceLineItems,
   getEffectiveLineItemStatus,
@@ -167,6 +170,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
 }) => {
   const {
     updateTokenVitals,
+    addTokenNursingNote,
     updateTokenDoctorOrders,
     settleTokenBilling,
     completeTokenDiagnosticReport,
@@ -191,6 +195,10 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
   const [spO2, setSpO2] = useState<number>(98);
   const [temperature, setTemperature] = useState<number>(98.6);
   const [respiratoryRate, setRespiratoryRate] = useState<number>(16);
+  const [heightCm, setHeightCm] = useState<number>(0);
+  const [weightKg, setWeightKg] = useState<number>(0);
+  const [triageNotes, setTriageNotes] = useState('');
+  const [nurseProgressNote, setNurseProgressNote] = useState('');
   const [bloodGlucose, setBloodGlucose] = useState<number>(95);
   const [painScale, setPainScale] = useState<number>(0);
   const [triageLevel, setTriageLevel] = useState<TokenVitalsRecord['triageLevel']>('Level 3 - Urgent');
@@ -205,6 +213,10 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
   const [healthSummary, setHealthSummary] = useState<string>('');
   const [chiefComplaint, setChiefComplaint] = useState<string>('');
   const [clinicalAssessment, setClinicalAssessment] = useState<string>('');
+  const [soapSubjective, setSoapSubjective] = useState('');
+  const [soapObjective, setSoapObjective] = useState('');
+  const [soapAssessment, setSoapAssessment] = useState('');
+  const [soapPlan, setSoapPlan] = useState('');
   const [diagnoses, setDiagnoses] = useState<Array<{ code: string; description: string }>>([]);
   const [selectedDiagnosisCode, setSelectedDiagnosisCode] = useState('');
   const [doctorFormError, setDoctorFormError] = useState('');
@@ -224,8 +236,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
   const [applyDailyInsuranceLimit, setApplyDailyInsuranceLimit] = useState(false);
 
   // Step 5: Diagnostics Execution State
-  const [diagnosticType, setDiagnosticType] = useState<'Laboratory' | 'Radiology'>('Laboratory');
-  const [testOrStudyName, setTestOrStudyName] = useState('Complete Blood Count (CBC with Diff)');
+  const [diagnosticLineItemId, setDiagnosticLineItemId] = useState('');
   const [diagnosticFindings, setDiagnosticFindings] = useState('WBC: 6.5 K/uL, Hemoglobin: 14.2 g/dL, Platelets: 245 K/uL. Normal morphology.');
   const [diagnosticImpression, setDiagnosticImpression] = useState('Parameters within normal physiologic limits. No leukocytosis.');
   const [diagnosticResultValue, setDiagnosticResultValue] = useState('WBC 6.5 | Hb 14.2');
@@ -247,11 +258,16 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
         setSpO2(token.vitals.spO2);
         setTemperature(token.vitals.temperature);
         setRespiratoryRate(token.vitals.respiratoryRate);
+        setHeightCm(token.vitals.heightCm || 0);
+        setWeightKg(token.vitals.weightKg || 0);
+        setTriageNotes(token.vitals.chiefComplaint || '');
         if (token.vitals.bloodGlucose) setBloodGlucose(token.vitals.bloodGlucose);
         if (token.vitals.painScale !== undefined) setPainScale(token.vitals.painScale);
         setTriageLevel(token.vitals.triageLevel);
         if (token.vitals.nursingNotes) setNursingNotes(token.vitals.nursingNotes);
       }
+      setNurseProgressNote('');
+      setDiagnosticLineItemId(token.lineItems?.find((item) => canExecuteSettledService(item))?.id || '');
       setServiceItems(token.serviceItems || []);
       setServiceItemName('');
       setServiceItemPrice('');
@@ -261,6 +277,10 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
         setHealthSummary(token.doctorOrders.healthSummary || '');
         setChiefComplaint(token.doctorOrders.chiefComplaint || '');
         setClinicalAssessment(token.doctorOrders.clinicalAssessment || '');
+        setSoapSubjective(token.doctorOrders.soapNotes?.subjective || '');
+        setSoapObjective(token.doctorOrders.soapNotes?.objective || '');
+        setSoapAssessment(token.doctorOrders.soapNotes?.assessment || '');
+        setSoapPlan(token.doctorOrders.soapNotes?.plan || '');
         setDiagnoses(token.doctorOrders.diagnoses || []);
         setConsultationFee(token.doctorOrders.consultationFee || 200);
         setLabOrders(token.doctorOrders.labRequests || []);
@@ -271,6 +291,10 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
         setHealthSummary('');
         setChiefComplaint('');
         setClinicalAssessment('');
+        setSoapSubjective('');
+        setSoapObjective('');
+        setSoapAssessment('');
+        setSoapPlan('');
         setDiagnoses([]);
         setSelectedDiagnosisCode('');
         setConsultationFee(200);
@@ -286,6 +310,21 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
   if (!isOpen || !token) return null;
 
   const currentStageIndex = STAGES.findIndex((s) => s.id === (token.currentStage || '1_REGISTRATION'));
+  const tokenPatient = patients.find((patient) => patient.id === token.patientId);
+  const visibleStages = currentRole === 'nurse'
+    ? [STAGES[1]]
+    : ['lab', 'radiology'].includes(currentRole)
+      ? [STAGES[4], STAGES[5]]
+      : ['admin'].includes(currentRole)
+        ? STAGES
+        : STAGES.filter((stage) => stage.id !== '5_DIAGNOSTICS_PROCEDURES');
+  const executableLineItems = (token.lineItems || []).filter((item) =>
+    canRoleExecuteServiceLineItem(item, currentRole)
+  );
+  const selectedExecutionLineItem = executableLineItems.find((item) => item.id === diagnosticLineItemId);
+  const calculatedBmi = heightCm > 0 && weightKg > 0
+    ? Math.round((weightKg / ((heightCm / 100) ** 2)) * 10) / 10
+    : undefined;
 
   // Calculate Cashier Totals
   const currentConsult = token.serviceType === 'Consultation'
@@ -465,6 +504,10 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
       spO2,
       temperature,
       respiratoryRate,
+      ...(heightCm > 0 ? { heightCm } : {}),
+      ...(weightKg > 0 ? { weightKg } : {}),
+      ...(calculatedBmi !== undefined ? { bmi: calculatedBmi } : {}),
+      ...(triageNotes.trim() ? { chiefComplaint: triageNotes.trim() } : {}),
       bloodGlucose,
       painScale,
       triageLevel,
@@ -472,8 +515,9 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
       nurseName: currentUser?.name || 'Triage Nurse Staff, RN',
       recordedAt: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
     };
-    updateTokenVitals(token.id, vitalsRecord, isNurseServiceToken ? serviceItems : undefined);
-    setActiveTab(isNurseServiceToken ? '4_CASHIER_BILLING' : '3_DOCTOR_EMR');
+    if (updateTokenVitals(token.id, vitalsRecord, isNurseServiceToken ? serviceItems : undefined)) {
+      setActiveTab(isNurseServiceToken ? '4_CASHIER_BILLING' : '3_DOCTOR_EMR');
+    }
   };
 
   const handleSaveTechnicianServices = () => {
@@ -557,6 +601,12 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
       healthSummary: healthSummary.trim(),
       chiefComplaint: chiefComplaint.trim(),
       clinicalAssessment: clinicalAssessment.trim(),
+      soapNotes: {
+        subjective: soapSubjective.trim(),
+        objective: soapObjective.trim(),
+        assessment: soapAssessment.trim(),
+        plan: soapPlan.trim(),
+      },
       diagnoses,
       labRequests: labOrders,
       radiologyRequests: radiologyOrders,
@@ -568,7 +618,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
       orderedAt: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
     };
     updateTokenDoctorOrders(token.id, doctorOrder);
-    setActiveTab('4_CASHIER_BILLING');
+    if (!token.doctorOrders) setActiveTab('4_CASHIER_BILLING');
   };
 
   // Handle Step 4 Submission (Cashier Billing)
@@ -629,14 +679,23 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
   // Handle Step 5 Submission (Diagnostics Execution)
   const handleDispatchReport = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!selectedExecutionLineItem) {
+      addNotification('Result Submission Blocked', 'Select an order that has been settled and released for execution.', 'warning', token.id);
+      return;
+    }
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     const today = new Date().toISOString().split('T')[0];
     const report: TokenDiagnosticReport = {
       id: `REP-${Date.now().toString().slice(-5)}`,
-      testOrStudyName,
-      department: diagnosticType === 'Radiology' ? 'Radiology' : 'Laboratory',
-      category: diagnosticType === 'Radiology' ? 'Radiology & Imaging' : 'Biochemistry / Hematology',
-      cptOrCode: diagnosticType === 'Radiology' ? 'CPT 71046' : 'CPT 85025',
+      lineItemId: selectedExecutionLineItem.id,
+      testOrStudyName: selectedExecutionLineItem.name,
+      department: selectedExecutionLineItem.kind === 'Radiology'
+        ? 'Radiology'
+        : selectedExecutionLineItem.kind === 'Procedure' || selectedExecutionLineItem.kind === 'Service'
+          ? 'Cardiology / Procedures'
+          : 'Laboratory',
+      category: selectedExecutionLineItem.kind,
+      cptOrCode: selectedExecutionLineItem.code,
       date: today,
       time: now,
       findings: diagnosticFindings,
@@ -644,14 +703,13 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
       resultValue: diagnosticResultValue,
       referenceRange: 'Normal reference limits verified',
       status: diagnosticStatus,
-      technicianOrRadiologist: currentUser?.name || (diagnosticType === 'Radiology' ? 'Dr. Katherine Cole, MD (Radiology)' : 'Alex Mercer, MLS(ASCP)'),
+      technicianOrRadiologist: currentUser?.name || 'Service Department Staff',
       completedAt: now,
       sentToPatient: true,
       sentToDoctor: true,
       sentTimestamp: `${today} ${now}`,
     };
-    completeTokenDiagnosticReport(token.id, report);
-    setActiveTab('6_COMPLETED_REPORTS');
+    if (completeTokenDiagnosticReport(token.id, report)) setActiveTab('6_COMPLETED_REPORTS');
   };
 
   return (
@@ -689,7 +747,8 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
         {/* 6-Stage Interactive Workflow Stepper Bar */}
         <div className="bg-slate-50 border-b border-slate-200 px-4 py-3 overflow-x-auto">
           <div className="flex items-center justify-between min-w-[700px] gap-2">
-            {STAGES.map((s, idx) => {
+            {visibleStages.map((s) => {
+              const idx = STAGES.findIndex((stage) => stage.id === s.id);
               const isPast = idx < currentStageIndex;
               const isCurrent = s.id === token.currentStage;
               const isSelected = s.id === activeTab;
@@ -1053,6 +1112,35 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                 </div>
 
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <label className="text-xs font-semibold text-slate-600 block mb-1">Height (cm)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.1"
+                    value={heightCm || ''}
+                    onChange={(event) => setHeightCm(Number(event.target.value))}
+                    className="w-full px-2.5 py-1.5 text-sm bg-white border border-slate-300 rounded-md font-semibold text-slate-900"
+                  />
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <label className="text-xs font-semibold text-slate-600 block mb-1">Weight (kg)</label>
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    value={weightKg || ''}
+                    onChange={(event) => setWeightKg(Number(event.target.value))}
+                    className="w-full px-2.5 py-1.5 text-sm bg-white border border-slate-300 rounded-md font-semibold text-slate-900"
+                  />
+                </div>
+
+                <div className="p-3 bg-teal-50 rounded-xl border border-teal-200">
+                  <label className="text-xs font-semibold text-teal-800 block mb-1">Calculated BMI</label>
+                  <output className="text-sm font-bold text-teal-900">{calculatedBmi === undefined ? 'Enter height and weight' : `${calculatedBmi} kg/m²`}</output>
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <label className="text-xs font-semibold text-slate-600 block mb-1">Blood Glucose (mg/dL)</label>
                   <input
                     type="number"
@@ -1090,6 +1178,19 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                 </div>
               </div>
               </>
+              )}
+
+              {token.serviceType !== 'Physio Technician' && (
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">Chief complaint / triage notes</label>
+                  <textarea
+                    rows={2}
+                    value={triageNotes}
+                    onChange={(event) => setTriageNotes(event.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:bg-white text-slate-900"
+                    placeholder="Patient's presenting concern and triage context"
+                  />
+                </div>
               )}
 
               {(token.serviceType === 'Billing & Cashier' || token.serviceType === 'Physio Technician') && (
@@ -1166,6 +1267,43 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                 />
               </div>}
 
+              {currentRole === 'nurse' && (
+                <section className="space-y-3 rounded-xl border border-teal-200 bg-white p-4">
+                  <div>
+                    <h5 className="text-sm font-bold text-slate-900">Dated nurse progress notes</h5>
+                    <p className="mt-1 text-xs text-slate-600">Notes are attributed to you and appended to this visit; doctor notes are not changed.</p>
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={nurseProgressNote}
+                    onChange={(event) => setNurseProgressNote(event.target.value)}
+                    className="w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:bg-white"
+                    placeholder="Write a nursing progress note for this visit..."
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      disabled={!nurseProgressNote.trim()}
+                      onClick={() => {
+                        if (addTokenNursingNote(token.id, nurseProgressNote)) setNurseProgressNote('');
+                      }}
+                      className="rounded-lg bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Add dated nurse note
+                    </button>
+                  </div>
+                  <ol className="max-h-40 space-y-2 overflow-y-auto">
+                    {[...(token.nursingNotes || [])].sort((first, second) => second.recordedAt.localeCompare(first.recordedAt)).map((note) => (
+                      <li key={note.id} className="rounded-lg bg-slate-50 p-2 text-xs">
+                        <p className="font-semibold text-slate-800">{note.nurseName} · {new Date(note.recordedAt).toLocaleString()}</p>
+                        <p className="mt-1 whitespace-pre-wrap text-slate-700">{note.note}</p>
+                      </li>
+                    ))}
+                    {!token.nursingNotes?.length && <li className="text-xs text-slate-500">No progress notes recorded for this visit.</li>}
+                  </ol>
+                </section>
+              )}
+
               {/* Submit Vitals Button */}
               <div className="flex justify-end gap-3 pt-2 border-t border-slate-200">
                 <button
@@ -1227,12 +1365,16 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                       <span className="font-bold text-slate-800">{token.vitals.heartRate} bpm</span>
                     </div>
                     <div className="bg-white p-2 rounded-lg border border-slate-200">
+                      <span className="text-slate-400 block">BMI</span>
+                      <span className="font-bold text-slate-800">{token.vitals.bmi ?? (token.vitals.heightCm && token.vitals.weightKg ? (token.vitals.weightKg / ((token.vitals.heightCm / 100) ** 2)).toFixed(1) : 'Not recorded')}</span>
+                    </div>
+                    <div className="bg-white p-2 rounded-lg border border-slate-200">
                       <span className="text-slate-400 block">SpO2</span>
                       <span className="font-bold text-slate-800">{token.vitals.spO2}%</span>
                     </div>
                     <div className="bg-white p-2 rounded-lg border border-slate-200">
                       <span className="text-slate-400 block">Temp</span>
-                      <span className="font-bold text-slate-800">{token.vitals.temperature}°F</span>
+                      <span className="font-bold text-slate-800">{((token.vitals.temperature - 32) * 5 / 9).toFixed(1)}°C</span>
                     </div>
                     <div className="bg-white p-2 rounded-lg border border-slate-200">
                       <span className="text-slate-400 block">Triage Acuity</span>
@@ -1245,6 +1387,18 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                   </div>
                 </div>
               )}
+              <section className="rounded-xl border border-rose-200 bg-rose-50/60 p-3.5">
+                <h5 className="text-xs font-bold uppercase tracking-wide text-rose-900">Patient allergy history · read only</h5>
+                {tokenPatient?.allergies?.length ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {tokenPatient.allergies.map((allergy, index) => (
+                      <span key={`${allergy.allergen}-${index}`} className="rounded-md border border-rose-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-rose-900">
+                        {allergy.allergen} · {allergy.severity}
+                      </span>
+                    ))}
+                  </div>
+                ) : <p className="mt-1 text-xs text-slate-600">No allergies documented in the patient profile.</p>}
+              </section>
 
               {/* Clinical Notes & Diagnosis */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1259,7 +1413,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">Consultation Charge ($)</label>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">Consultation Charge (AED)</label>
                   <input
                     type="number"
                     value={consultationFee}
@@ -1279,6 +1433,27 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                   placeholder="Document physician findings, systemic review, and differential diagnoses..."
                 />
               </div>
+              <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-3.5">
+                <h5 className="text-xs font-bold uppercase tracking-wide text-slate-700">Structured SOAP notes</h5>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <label className="text-xs font-semibold text-slate-700">
+                    Subjective
+                    <textarea rows={3} value={soapSubjective} onChange={(event) => setSoapSubjective(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm font-normal" placeholder="Patient-reported symptoms and history" />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-700">
+                    Objective
+                    <textarea rows={3} value={soapObjective} onChange={(event) => setSoapObjective(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm font-normal" placeholder="Examination and relevant findings" />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-700">
+                    Assessment
+                    <textarea rows={3} value={soapAssessment} onChange={(event) => setSoapAssessment(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm font-normal" placeholder="Clinical impression and differential" />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-700">
+                    Plan
+                    <textarea rows={3} value={soapPlan} onChange={(event) => setSoapPlan(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm font-normal" placeholder="Treatment, investigations, and follow-up" />
+                  </label>
+                </div>
+              </section>
 
               {/* Diagnosis ICD-10 */}
               <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
@@ -1291,29 +1466,17 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                         const code = e.target.value;
                         setSelectedDiagnosisCode(code);
                         if (!code) return;
-                        const library: Record<string, string> = {
-                          'I10': 'Essential (primary) hypertension',
-                          'I20.9': 'Angina pectoris, unspecified',
-                          'E11.9': 'Type 2 diabetes mellitus without complications',
-                          'J06.9': 'Acute upper respiratory infection, unspecified',
-                          'K30': 'Functional dyspepsia',
-                          'R51.9': 'Headache, unspecified',
-                          'M54.5': 'Low back pain, unspecified',
-                        };
+                        const diagnosis = ICD10_COMMON_CODES.find((item) => item.code === code);
                         if (!diagnoses.some((d) => d.code === code)) {
-                          setDiagnoses([...diagnoses, { code, description: library[code] || 'Clinical diagnosis' }]);
+                          setDiagnoses([...diagnoses, { code, description: diagnosis?.description || 'Clinical diagnosis' }]);
                         }
                       }}
                       className="px-2.5 py-1 text-xs bg-white border border-slate-300 rounded-md text-slate-800"
                     >
                       <option value="">Select diagnosis</option>
-                      <option value="I10">ICD-10 I10 (Hypertension)</option>
-                      <option value="I20.9">ICD-10 I20.9 (Angina Pectoris)</option>
-                      <option value="E11.9">ICD-10 E11.9 (Type 2 Diabetes)</option>
-                      <option value="J06.9">ICD-10 J06.9 (Upper Resp Infection)</option>
-                      <option value="K30">ICD-10 K30 (Dyspepsia)</option>
-                      <option value="R51.9">ICD-10 R51.9 (Headache)</option>
-                      <option value="M54.5">ICD-10 M54.5 (Low Back Pain)</option>
+                      {ICD10_COMMON_CODES.map((item) => (
+                        <option key={item.code} value={item.code}>ICD-10 {item.code} · {item.description}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -1385,9 +1548,25 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                   <div className="space-y-1">
                     <p className="text-[10px] font-bold uppercase text-slate-600">Ordered medications</p>
                     {medicationRequests.map((medication) => (
-                      <div key={medication.id} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs">
-                        <span>{medication.medicationName} · {medication.sku} · Qty {medication.quantity}</span>
-                        <span className="flex items-center gap-3"><strong>AED {medication.price.toFixed(2)}</strong><button type="button" onClick={() => setMedicationRequests((items) => items.filter((item) => item.id !== medication.id))} className="text-rose-600">Remove</button></span>
+                      <div key={medication.id} className="rounded-lg border border-slate-200 bg-white p-3">
+                        <div className="flex items-start justify-between gap-3 text-xs">
+                          <span className="font-semibold">{medication.medicationName} · DDC {medication.sku}</span>
+                          <span className="flex shrink-0 items-center gap-3"><strong>AED {medication.price.toFixed(2)}</strong><button type="button" onClick={() => setMedicationRequests((items) => items.filter((item) => item.id !== medication.id))} className="text-rose-600">Remove</button></span>
+                        </div>
+                        <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                          <label className="text-[10px] font-semibold text-slate-600">
+                            Dosage
+                            <input value={medication.dosage || ''} onChange={(event) => setMedicationRequests((items) => items.map((item) => item.id === medication.id ? { ...item, dosage: event.target.value } : item))} className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-xs font-normal" placeholder="e.g. 500 mg" />
+                          </label>
+                          <label className="text-[10px] font-semibold text-slate-600">
+                            Duration
+                            <input value={medication.duration || ''} onChange={(event) => setMedicationRequests((items) => items.map((item) => item.id === medication.id ? { ...item, duration: event.target.value } : item))} className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-xs font-normal" placeholder="e.g. 5 days" />
+                          </label>
+                          <label className="text-[10px] font-semibold text-slate-600">
+                            Instructions
+                            <input value={medication.instructions || ''} onChange={(event) => setMedicationRequests((items) => items.map((item) => item.id === medication.id ? { ...item, instructions: event.target.value } : item))} className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 text-xs font-normal" placeholder="e.g. Take after meals" />
+                          </label>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1476,7 +1655,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                 <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
                   <div className="flex items-center justify-between">
                     <h5 className="text-xs font-bold text-slate-700 flex items-center gap-1">
-                      <Activity className="w-3.5 h-3.5 text-purple-600" /> Procedure CPT ({procedureOrders.length})
+                      <Activity className="w-3.5 h-3.5 text-purple-600" /> Injection & Procedure CPT ({procedureOrders.length})
                     </h5>
                     <button
                       type="button"
@@ -1558,7 +1737,8 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                   type="submit"
                   className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg flex items-center gap-2 shadow-xs transition-colors"
                 >
-                  <Receipt className="w-4 h-4" /> Save Orders & Forward to Cashier for Invoicing (Step 4)
+                  <Receipt className="w-4 h-4" />
+                  {token.doctorOrders ? 'Save EMR Changes' : 'Save EMR & Forward to Cashier for Invoicing (Step 4)'}
                 </button>
               </div>
             </form>
@@ -1893,40 +2073,35 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                 </span>
               </div>
 
-              {/* Department & Test Selection */}
+              {executableLineItems.length === 0 && (
+                <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                  No authorized, settled service orders are ready for execution on this token.
+                </p>
+              )}
+
+              {/* Select only a settled, released order */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">Diagnostic Department</label>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">Ready service order</label>
                   <select
-                    value={diagnosticType}
-                    onChange={(e) => {
-                      const type = e.target.value as 'Laboratory' | 'Radiology';
-                      setDiagnosticType(type);
-                      if (type === 'Radiology') {
-                        setTestOrStudyName('Chest X-Ray PA & Lateral View');
-                        setDiagnosticFindings('No focal consolidation or pleural effusion. Cardiomediastinal silhouette normal.');
-                        setDiagnosticImpression('Clear lung fields. No acute cardiopulmonary process.');
-                        setDiagnosticResultValue('Clear, normal anatomy');
-                      } else {
-                        setTestOrStudyName('Complete Blood Count (CBC with Diff)');
-                        setDiagnosticFindings('WBC: 6.5 K/uL, Hemoglobin: 14.2 g/dL, Platelets: 245 K/uL. Normal morphology.');
-                        setDiagnosticImpression('Parameters within normal physiologic limits. No leukocytosis.');
-                        setDiagnosticResultValue('WBC 6.5 | Hb 14.2');
-                      }
-                    }}
+                    value={diagnosticLineItemId}
+                    onChange={(event) => setDiagnosticLineItemId(event.target.value)}
+                    required
+                    disabled={executableLineItems.length === 0}
                     className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-lg text-slate-900 font-medium"
                   >
-                    <option value="Laboratory">Laboratory (Hematology / Biochemistry / Pathology)</option>
-                    <option value="Radiology">Radiology & Imaging (X-Ray / CT / MRI / Ultrasound)</option>
+                    {executableLineItems.map((item) => (
+                      <option key={item.id} value={item.id}>{item.name} · {item.department}</option>
+                    ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">Test or Study Title</label>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">Measured value / result</label>
                   <input
                     type="text"
-                    value={testOrStudyName}
-                    onChange={(e) => setTestOrStudyName(e.target.value)}
+                    value={diagnosticResultValue}
+                    onChange={(event) => setDiagnosticResultValue(event.target.value)}
                     className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-lg text-slate-900 font-medium"
                     required
                   />
@@ -1984,6 +2159,7 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                 </div>
                 <button
                   type="submit"
+                  disabled={!selectedExecutionLineItem}
                   className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg flex items-center gap-2 shadow-xs transition-colors shrink-0"
                 >
                   <Send className="w-4 h-4" /> Verify & Dispatch to Doctor EMR & Patient (Step 6)

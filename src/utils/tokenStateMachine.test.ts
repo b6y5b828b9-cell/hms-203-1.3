@@ -6,8 +6,13 @@ import {
   appendTokenLineItems,
   canDispenseMedicationLineItem,
   canExecuteDiagnosticLineItem,
+  canExecuteOutpatientTreatment,
   createDoctorOrderLineItems,
   getEffectiveLineItemStatus,
+  canExecuteSettledService,
+  canRoleExecuteServiceLineItem,
+  settleServiceLineItems,
+  isOutpatientTreatmentReady,
 } from './tokenStateMachine';
 
 const createToken = (insured = true): ReceptionToken => ({
@@ -51,6 +56,9 @@ const createOrders = (): TokenDoctorOrder => ({
     quantity: 2,
     unitPrice: 10,
     price: 20,
+    dosage: '10 mg',
+    duration: '5 days',
+    instructions: 'Take after meals',
   }],
   consultationFee: 50,
   orderedByDoctorId: 'DOC-1',
@@ -63,7 +71,14 @@ test('appends doctor orders to their existing token with per-item authorization 
   const items = createDoctorOrderLineItems(token, createOrders());
   assert.deepEqual(items.map((item) => item.id), ['TOK-1-consult', 'LAB-1', 'RAD-1', 'MED-1']);
   assert.ok(items.every((item) => item.insuranceStatus === 'Pending_Auth'));
+  assert.ok(items.filter((item) => ['Lab', 'Radiology', 'Medication'].includes(item.kind)).every((item) => item.executionStatus === 'PENDING_SETTLEMENT'));
   assert.equal(items.find((item) => item.id === 'MED-1')?.kind, 'Medication');
+  assert.deepEqual(items.find((item) => item.id === 'MED-1')?.medicationDetails, {
+    ddcCode: 'SKU-1',
+    dosage: '10 mg',
+    duration: '5 days',
+    instructions: 'Take after meals',
+  });
 
   const approved = { ...items[1], insuranceStatus: 'Approved' as const };
   const appended = appendTokenLineItems([approved], items);
@@ -73,6 +88,8 @@ test('appends doctor orders to their existing token with per-item authorization 
   const selfPayItems = createDoctorOrderLineItems(createToken(false), createOrders());
   assert.ok(selfPayItems.every((item) => item.insuranceStatus === 'Cash_Only'));
   assert.ok(selfPayItems.every((item) => getEffectiveLineItemStatus(item) === 'Self_Pay'));
+  const settledSelfPay = settleServiceLineItems(selfPayItems);
+  assert.ok(settledSelfPay.filter((item) => ['Lab', 'Radiology', 'Medication'].includes(item.kind)).every((item) => item.executionStatus === 'READY_FOR_EXECUTION'));
 });
 
 test('department gates distinguish diagnostics from medication dispensing', () => {
@@ -92,11 +109,20 @@ test('department gates distinguish diagnostics from medication dispensing', () =
   assert.equal(canExecuteDiagnosticLineItem(base), false);
   assert.equal(canExecuteDiagnosticLineItem({ ...base, insuranceStatus: 'Denied' }), false);
   assert.equal(canExecuteDiagnosticLineItem({ ...base, insuranceStatus: 'Cash_Only' }), true);
+  assert.equal(canExecuteSettledService({ ...base, insuranceStatus: 'Approved' }), false);
+  assert.equal(canExecuteSettledService({ ...base, insuranceStatus: 'Approved', executionStatus: 'READY_FOR_EXECUTION' }), true);
+  const readyLab = { ...base, insuranceStatus: 'Approved' as const, executionStatus: 'READY_FOR_EXECUTION' as const };
+  assert.equal(canRoleExecuteServiceLineItem(readyLab, 'lab'), true);
+  assert.equal(canRoleExecuteServiceLineItem(readyLab, 'radiology'), false);
+  assert.equal(canRoleExecuteServiceLineItem(readyLab, 'nurse'), false);
+  assert.equal(canRoleExecuteServiceLineItem({ ...readyLab, kind: 'Procedure', department: 'Procedures' }, 'nurse'), true);
   assert.equal(canDispenseMedicationLineItem({ ...base, kind: 'Medication', insuranceStatus: 'Partially_Approved' }), false);
   assert.equal(canDispenseMedicationLineItem({ ...base, kind: 'Medication', insuranceStatus: 'Cash_Only' }), false);
-  assert.equal(canDispenseMedicationLineItem({ ...base, kind: 'Medication', insuranceStatus: 'Approved' }), true);
+  assert.equal(canDispenseMedicationLineItem({ ...base, kind: 'Medication', insuranceStatus: 'Approved' }), false);
+  assert.equal(canDispenseMedicationLineItem({ ...base, kind: 'Medication', insuranceStatus: 'Approved', executionStatus: 'READY_FOR_EXECUTION' }), true);
   assert.equal(canDispenseMedicationLineItem({
     ...base,
+    executionStatus: 'READY_FOR_EXECUTION',
     paymentOverride: {
       mode: 'Self_Pay',
       reason: 'Patient elected cash payment',
@@ -110,6 +136,61 @@ test('department gates distinguish diagnostics from medication dispensing', () =
     overriddenBy: 'Insurance Approver',
     overriddenAt: '2026-10-24T09:00:00.000Z',
   } }), 'Self_Pay');
+});
+
+test('outpatient nurse treatment requires readiness plus approval or cash settlement', () => {
+  const token = createToken();
+  const readyToken: ReceptionToken = { ...token, status: 'Ready for Treatment' };
+  const treatment: TokenLineItem = {
+    id: 'PROC-1',
+    kind: 'Procedure',
+    name: 'Wound dressing',
+    department: 'Outpatient Nursing',
+    quantity: 1,
+    unitPrice: 50,
+    totalPrice: 50,
+    orderedBy: 'Dr. Test',
+    orderedAt: '2026-10-24T09:00:00.000Z',
+    insuranceStatus: 'Approved',
+    executionStatus: 'READY_FOR_EXECUTION',
+    fulfillmentStatus: 'Ordered',
+  };
+  assert.equal(isOutpatientTreatmentReady(token, treatment), true);
+  assert.equal(canExecuteOutpatientTreatment(token, treatment), false);
+  assert.equal(canExecuteOutpatientTreatment(readyToken, treatment), true);
+  assert.equal(canExecuteOutpatientTreatment(readyToken, { ...treatment, executionStatus: 'PENDING_SETTLEMENT' }), false);
+  assert.equal(canExecuteOutpatientTreatment(readyToken, { ...treatment, insuranceStatus: 'Pending_Auth' }), false);
+  assert.equal(canExecuteOutpatientTreatment(readyToken, { ...treatment, insuranceStatus: 'Denied' }), false);
+  assert.equal(canExecuteOutpatientTreatment(readyToken, { ...treatment, kind: 'Lab' }), false);
+
+  const settledToken: ReceptionToken = {
+    ...readyToken,
+    billingSummary: {
+      subtotal: 50,
+      schemeType: 'Self-Pay',
+      insuranceCoveredAmount: 0,
+      discountAmount: 0,
+      copayOrSelfPayAmount: 50,
+      totalPaid: 50,
+      balanceDue: 0,
+      paymentMethod: 'Cash',
+      paymentStatus: 'SETTLED',
+      cashierName: 'Cashier',
+      billedAt: '2026-10-24T09:00:00.000Z',
+    },
+  };
+  assert.equal(canExecuteOutpatientTreatment(settledToken, { ...treatment, insuranceStatus: 'Cash_Only' }), true);
+  assert.equal(canExecuteOutpatientTreatment(settledToken, {
+    ...treatment,
+    insuranceStatus: 'Denied',
+    paymentOverride: {
+      mode: 'Self_Pay',
+      reason: 'Patient elected self-pay',
+      overriddenBy: 'Cashier',
+      overriddenAt: '2026-10-24T09:00:00.000Z',
+    },
+  }), true);
+  assert.equal(canExecuteOutpatientTreatment(readyToken, { ...treatment, insuranceStatus: 'Cash_Only' }), false);
 });
 
 test('billing totals use final line-item statuses and report unresolved authorization', () => {

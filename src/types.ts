@@ -9,6 +9,9 @@ export interface Vitals {
   spO2: number; // %
   temperature: number; // °F
   respiratoryRate: number; // breaths/min
+  heightCm?: number;
+  weightKg?: number;
+  bmi?: number;
   recordedAt: string;
   painScore?: number; // 0-10 scale
   bloodGlucose?: number; // mg/dL
@@ -127,6 +130,7 @@ export interface LabResult {
     readBackConfirmed?: boolean;
     technicianName?: string;
   };
+  reportFiles?: Array<Pick<EncounterDocumentAttachment, 'id' | 'fileName' | 'mimeType' | 'dataUrl'>>;
 }
 
 export interface PatientService {
@@ -757,23 +761,53 @@ export interface TokenVitalsRecord {
   spO2: number;
   temperature: number;
   respiratoryRate: number;
+  heightCm?: number;
+  weightKg?: number;
+  bmi?: number;
+  chiefComplaint?: string;
   bloodGlucose?: number;
   painScale?: number;
+  allergyUpdates?: string;
   triageLevel: 'Level 1 - Resuscitation' | 'Level 2 - Emergent' | 'Level 3 - Urgent' | 'Level 4 - Less Urgent' | 'Level 5 - Non-Urgent';
   nursingNotes?: string;
   nurseName: string;
   recordedAt: string;
 }
 
+export interface TokenNursingNote {
+  id: string;
+  note: string;
+  nurseId: string;
+  nurseName: string;
+  recordedAt: string;
+  noteType?: 'Progress' | 'Discharge';
+}
+
 export interface TokenDoctorOrder {
   healthSummary?: string;
   chiefComplaint?: string;
   clinicalAssessment?: string;
+  soapNotes?: {
+    subjective?: string;
+    objective?: string;
+    assessment?: string;
+    plan?: string;
+  };
   diagnoses: Array<{ code: string; description: string; notes?: string }>;
   labRequests: Array<{ id: string; testName: string; category: string; cptCode?: string; price: number; status: 'Ordered' | 'Sample Collected' | 'Completed' }>;
   radiologyRequests: Array<{ id: string; studyName: string; modality: string; cptCode?: string; price: number; status: 'Ordered' | 'In Progress' | 'Completed' }>;
   procedureRequests: Array<{ id: string; cptCode: string; procedureName: string; price: number; status: 'Scheduled' | 'Completed' }>;
-  medicationRequests?: Array<{ id: string; sku: string; medicationName: string; quantity: number; unitPrice: number; price: number }>;
+  medicationRequests?: Array<{
+    id: string;
+    sku: string;
+    medicationName: string;
+    quantity: number;
+    unitPrice: number;
+    price: number;
+    dosage?: string;
+    duration?: string;
+    instructions?: string;
+  }>;
   consultationFee: number;
   doctorNotes?: string;
   orderedByDoctorId: string;
@@ -795,7 +829,7 @@ export interface TokenBillingSummary {
   totalPaid: number;
   balanceDue: number;
   paymentMethod: 'Cash' | 'Credit/Debit Card' | 'HSA/FSA' | 'Direct Insurance' | 'Online Gateway';
-  paymentStatus: 'Paid' | 'Pending' | 'Waived';
+  paymentStatus: 'Paid' | 'Pending' | 'Waived' | 'SETTLED';
   receiptNumber?: string;
   cashierName: string;
   billedAt: string;
@@ -857,11 +891,39 @@ export interface TokenLineItem {
     overriddenBy: string;
     overriddenAt: string;
   };
+  executionStatus?: 'PENDING_SETTLEMENT' | 'READY_FOR_EXECUTION' | 'COMPLETED';
+  treatmentExecution?: {
+    executedAt: string;
+    executedBy: string;
+    executedByName?: string;
+    notes?: string;
+  };
+  medicationDetails?: {
+    ddcCode?: string;
+    dosage?: string;
+    duration?: string;
+    instructions?: string;
+  };
+  resultPayload?: TokenServiceResult;
   fulfillmentStatus: 'Ordered' | 'In Progress' | 'Completed' | 'Dispensed';
+}
+
+export interface TokenServiceResult {
+  value?: string;
+  referenceRange?: string;
+  findings?: string;
+  impression?: string;
+  status?: 'Normal' | 'Elevated' | 'Critical' | 'Completed';
+  reportFiles?: Array<Pick<EncounterDocumentAttachment, 'id' | 'fileName' | 'mimeType' | 'dataUrl'>>;
+  submittedAt: string;
+  submittedBy: string;
+  acknowledgedAt?: string;
+  acknowledgedBy?: string;
 }
 
 export interface TokenDiagnosticReport {
   id: string;
+  lineItemId?: string;
   testOrStudyName: string;
   department: 'Laboratory' | 'Radiology' | 'Cardiology / Procedures';
   category?: string;
@@ -879,6 +941,7 @@ export interface TokenDiagnosticReport {
   sentToDoctor: boolean;
   sentTimestamp?: string;
   reportPdfUrl?: string;
+  reportFiles?: TokenServiceResult['reportFiles'];
 }
 
 export interface EncounterDocumentAttachment {
@@ -901,7 +964,7 @@ export interface ReceptionToken {
   department: string;
   serviceType: 'Consultation' | 'Billing & Cashier' | 'Insurance Authorisation' | 'Lab Sample' | 'Report Collection' | 'Physio Technician';
   priority: 'Normal' | 'Urgent' | 'VIP / Elderly';
-  status: 'Waiting' | 'In Consultation' | 'Completed' | 'Cancelled';
+  status: 'Waiting' | 'In Triage' | 'In Consultation' | 'Ready for Treatment' | 'Completed' | 'Cancelled';
   createdDate?: string;
   createdTime: string;
   estimatedWaitMins: number;
@@ -966,6 +1029,7 @@ export interface ReceptionToken {
   currentStage?: TokenWorkflowStage;
   paymentScheme?: TokenPaymentScheme;
   vitals?: TokenVitalsRecord;
+  nursingNotes?: TokenNursingNote[];
   serviceItems?: TokenServiceItem[];
   lineItems?: TokenLineItem[];
   pendingServiceIds?: string[];
@@ -1162,6 +1226,7 @@ export interface MedicalCertificate {
   id: string; // e.g. MC-2026-001
   certificateNumber: string; // e.g. DHA-MC-90812
   patientId: string;
+  encounterTokenId?: string;
   patientName: string;
   patientMrn: string;
   patientDob: string;

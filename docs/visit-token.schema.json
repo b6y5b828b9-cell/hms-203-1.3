@@ -36,7 +36,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["Waiting", "In Consultation", "Completed", "Cancelled"]
+      "enum": ["Waiting", "In Triage", "In Consultation", "Ready for Treatment", "Completed", "Cancelled"]
     },
     "paymentScheme": {
       "type": "object",
@@ -64,6 +64,29 @@
     "currentStage": {
       "type": "string"
     },
+    "vitals": {
+      "$ref": "#/$defs/vitals"
+    },
+    "doctorOrders": {
+      "$ref": "#/$defs/doctorOrders"
+    },
+    "nursingNotes": {
+      "type": "array",
+      "description": "Append-only nurse-authored progress notes scoped to this visit token.",
+      "items": {
+        "type": "object",
+        "required": ["id", "note", "nurseId", "nurseName", "recordedAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "note": { "type": "string", "minLength": 1 },
+          "nurseId": { "type": "string" },
+          "nurseName": { "type": "string" },
+          "recordedAt": { "type": "string", "format": "date-time" },
+          "noteType": { "type": "string", "enum": ["Progress", "Discharge"] }
+        },
+        "additionalProperties": false
+      }
+    },
     "line_items": {
       "type": "array",
       "items": {
@@ -88,6 +111,10 @@
         "balanceDue": {
           "type": "number",
           "minimum": 0
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["Pending", "Paid", "Waived", "SETTLED"]
         }
       },
       "additionalProperties": true
@@ -108,6 +135,86 @@
     }
   },
   "$defs": {
+    "vitals": {
+      "type": "object",
+      "properties": {
+        "bpSystolic": { "type": "number" },
+        "bpDiastolic": { "type": "number" },
+        "heartRate": { "type": "number" },
+        "spO2": { "type": "number" },
+        "temperature": {
+          "type": "number",
+          "description": "Stored in Fahrenheit for compatibility; outpatient nurses enter Celsius and the client converts before saving."
+        },
+        "respiratoryRate": { "type": "number" },
+        "heightCm": { "type": "number", "exclusiveMinimum": 0 },
+        "weightKg": { "type": "number", "exclusiveMinimum": 0 },
+        "bmi": { "type": "number", "exclusiveMinimum": 0, "description": "Calculated from heightCm and weightKg." },
+        "chiefComplaint": { "type": "string" },
+        "bloodGlucose": { "type": "number" },
+        "painScale": { "type": "number", "minimum": 0, "maximum": 10 },
+        "allergyUpdates": { "type": "string", "description": "Token-scoped nurse allergy review or update." },
+        "triageLevel": { "type": "string" },
+        "nursingNotes": { "type": "string" },
+        "nurseName": { "type": "string" },
+        "recordedAt": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "doctorOrders": {
+      "type": "object",
+      "properties": {
+        "healthSummary": { "type": "string" },
+        "chiefComplaint": { "type": "string" },
+        "clinicalAssessment": { "type": "string" },
+        "soapNotes": {
+          "type": "object",
+          "properties": {
+            "subjective": { "type": "string" },
+            "objective": { "type": "string" },
+            "assessment": { "type": "string" },
+            "plan": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "diagnoses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "description"],
+            "properties": {
+              "code": { "type": "string" },
+              "description": { "type": "string" },
+              "notes": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "medicationRequests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "sku", "medicationName", "quantity", "unitPrice", "price"],
+            "properties": {
+              "id": { "type": "string" },
+              "sku": { "type": "string", "description": "DDC/drug catalog code." },
+              "medicationName": { "type": "string" },
+              "quantity": { "type": "number", "exclusiveMinimum": 0 },
+              "unitPrice": { "type": "number", "minimum": 0 },
+              "price": { "type": "number", "minimum": 0 },
+              "dosage": { "type": "string" },
+              "duration": { "type": "string" },
+              "instructions": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "orderedByDoctorId": { "type": "string" },
+        "orderedByDoctorName": { "type": "string" },
+        "orderedAt": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
     "lineItem": {
       "type": "object",
       "required": [
@@ -170,6 +277,64 @@
         "fulfillmentStatus": {
           "type": "string",
           "enum": ["Ordered", "In Progress", "Completed", "Dispensed"]
+        },
+        "executionStatus": {
+          "type": "string",
+          "enum": ["PENDING_SETTLEMENT", "READY_FOR_EXECUTION", "COMPLETED"]
+        },
+        "treatmentExecution": {
+          "type": "object",
+          "required": ["executedAt", "executedBy"],
+          "properties": {
+            "executedAt": { "type": "string", "format": "date-time" },
+            "executedBy": { "type": "string" },
+            "executedByName": { "type": "string" },
+            "notes": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "medicationDetails": {
+          "type": "object",
+          "properties": {
+            "ddcCode": { "type": "string" },
+            "dosage": { "type": "string" },
+            "duration": { "type": "string" },
+            "instructions": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "resultPayload": {
+          "$ref": "#/$defs/serviceResult"
+        }
+      },
+      "additionalProperties": false
+    },
+    "serviceResult": {
+      "type": "object",
+      "required": ["submittedAt", "submittedBy"],
+      "properties": {
+        "value": { "type": "string" },
+        "referenceRange": { "type": "string" },
+        "findings": { "type": "string" },
+        "impression": { "type": "string" },
+        "status": { "type": "string", "enum": ["Normal", "Elevated", "Critical", "Completed"] },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "submittedBy": { "type": "string" },
+        "acknowledgedAt": { "type": "string", "format": "date-time" },
+        "acknowledgedBy": { "type": "string" },
+        "reportFiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "fileName", "mimeType", "dataUrl"],
+            "properties": {
+              "id": { "type": "string" },
+              "fileName": { "type": "string" },
+              "mimeType": { "type": "string", "enum": ["application/pdf", "image/jpeg", "image/png"] },
+              "dataUrl": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

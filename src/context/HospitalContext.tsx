@@ -33,11 +33,13 @@ import {
   TokenWorkflowStage,
   TokenPaymentScheme,
   TokenVitalsRecord,
+  TokenNursingNote,
   TokenDoctorOrder,
   TokenBillingSummary,
   TokenDiagnosticReport,
   TokenServiceItem,
   TokenLineItem,
+  TokenServiceResult,
   EncounterDocumentAttachment,
   DoctorDutyChangeRequest,
   DoctorDutySchedule,
@@ -50,6 +52,7 @@ import {
   PharmacyDispenseRecord,
   BedTransferRecord,
 } from '../types';
+import { ROLE_DEFINITIONS } from './roleDefinitions';
 import { getPatientPhoto } from '../utils/patientImages';
 import { parseInsuranceDeductible, sumInvoiceItemField } from '../utils/insuranceInvoice';
 import { initialHospitalPriceCatalog } from '../data/hospitalPriceCatalog';
@@ -60,11 +63,15 @@ import {
   appendTokenLineItems,
   canDispenseMedicationLineItem,
   canExecuteDiagnosticLineItem,
+  canExecuteOutpatientTreatment,
   createDoctorOrderLineItems,
   createServiceLineItems,
   getEffectiveLineItemStatus,
   isSelfPayToken,
   getTokenLineItemBillingBreakdown,
+  canExecuteSettledService,
+  canRoleExecuteServiceLineItem,
+  settleServiceLineItems,
 } from '../utils/tokenStateMachine';
 import {
   classifyInsuranceEligibility,
@@ -139,144 +146,6 @@ export interface WorkspaceTab {
 }
 
 export type RegistrationMode = 'new' | 'existing' | 'appointment' | 'edit';
-
-export const ROLE_DEFINITIONS: Record<UserRole, RoleDefinition> = {
-  admin: {
-    role: 'admin',
-    label: 'Hospital Administrator',
-    description: 'Full supervisory authority across clinical, financial, and compliance modules.',
-    permissions: {
-      canRegisterPatients: true,
-      canEditEMR: true,
-      canPrescribeMeds: true,
-      canDispenseMeds: true,
-      canRunLabTests: true,
-      canReviewRadiology: true,
-      canManageBilling: true,
-      canAccessAuditLogs: true,
-    },
-  },
-  doctor: {
-    role: 'doctor',
-    label: 'Attending Physician',
-    description: 'Diagnose patients, write clinical notes, prescribe meds, review diagnostics.',
-    permissions: {
-      canRegisterPatients: true,
-      canEditEMR: true,
-      canPrescribeMeds: true,
-      canDispenseMeds: false,
-      canRunLabTests: true,
-      canReviewRadiology: true,
-      canManageBilling: false,
-      canAccessAuditLogs: false,
-    },
-  },
-  physiotherapist: {
-    role: 'physiotherapist',
-    label: 'Physiotherapist',
-    description: 'Provide rehabilitation and physical therapy services.',
-    permissions: {
-      canRegisterPatients: false,
-      canEditEMR: false,
-      canPrescribeMeds: false,
-      canDispenseMeds: false,
-      canRunLabTests: false,
-      canReviewRadiology: false,
-      canManageBilling: false,
-      canAccessAuditLogs: false,
-    },
-  },
-  nurse: {
-    role: 'nurse',
-    label: 'Registered Nurse',
-    description: 'Record vitals, administer medications, manage ward bed allocations.',
-    permissions: {
-      canRegisterPatients: true,
-      canEditEMR: true,
-      canPrescribeMeds: false,
-      canDispenseMeds: true,
-      canRunLabTests: true,
-      canReviewRadiology: true,
-      canManageBilling: false,
-      canAccessAuditLogs: false,
-    },
-  },
-  pharmacist: {
-    role: 'pharmacist',
-    label: 'Clinical Pharmacist',
-    description: 'Formulary inventory management, dispense meds, safety screening.',
-    permissions: {
-      canRegisterPatients: false,
-      canEditEMR: false,
-      canPrescribeMeds: false,
-      canDispenseMeds: true,
-      canRunLabTests: false,
-      canReviewRadiology: false,
-      canManageBilling: true,
-      canAccessAuditLogs: false,
-    },
-  },
-  receptionist: {
-    role: 'receptionist',
-    label: 'Patient Registrar',
-    description: 'Patient check-in, schedule appointments, queue triage, invoicing.',
-    permissions: {
-      canRegisterPatients: true,
-      canEditEMR: false,
-      canPrescribeMeds: false,
-      canDispenseMeds: false,
-      canRunLabTests: false,
-      canReviewRadiology: false,
-      canManageBilling: true,
-      canAccessAuditLogs: false,
-    },
-  },
-  lab: {
-    role: 'lab',
-    label: 'Lab Technologist',
-    description: 'Pathology specimen processing, biochemistry assays, critical flag verification.',
-    permissions: {
-      canRegisterPatients: false,
-      canEditEMR: false,
-      canPrescribeMeds: false,
-      canDispenseMeds: false,
-      canRunLabTests: true,
-      canReviewRadiology: false,
-      canManageBilling: false,
-      canAccessAuditLogs: false,
-    },
-  },
-  radiology: {
-    role: 'radiology',
-    label: 'Diagnostic Radiologist',
-    description: 'DICOM imaging reviews, PACS modality triage, radiologic diagnostic reports.',
-    permissions: {
-      canRegisterPatients: false,
-      canEditEMR: true,
-      canPrescribeMeds: false,
-      canDispenseMeds: false,
-      canRunLabTests: false,
-      canReviewRadiology: true,
-      canManageBilling: false,
-      canAccessAuditLogs: false,
-    },
-  },
-  'medical-coder': {
-    role: 'medical-coder',
-    label: 'Medical Coder',
-    description: 'Review insurance pre-authorizations and publish approved diagnostic reports to patient records.',
-    permissions: {
-      canRegisterPatients: false,
-      canEditEMR: false,
-      canPrescribeMeds: false,
-      canDispenseMeds: false,
-      canRunLabTests: false,
-      canReviewRadiology: false,
-      canManageBilling: false,
-      canAccessAuditLogs: false,
-    },
-  },
-};
 
 interface HospitalContextType {
   patients: Patient[];
@@ -373,7 +242,9 @@ interface HospitalContextType {
   createReceptionToken: (data: Omit<ReceptionToken, 'id' | 'tokenNumber' | 'createdTime'>) => ReceptionToken;
   updateReceptionTokenStatus: (id: string, status: ReceptionToken['status']) => void;
   advanceTokenWorkflow: (tokenId: string, nextStage: TokenWorkflowStage, updates?: Partial<ReceptionToken>) => void;
-  updateTokenVitals: (tokenId: string, vitals: TokenVitalsRecord, serviceItems?: TokenServiceItem[]) => void;
+  updateTokenVitals: (tokenId: string, vitals: TokenVitalsRecord, serviceItems?: TokenServiceItem[]) => boolean;
+  addTokenNursingNote: (tokenId: string, note: string, noteType?: TokenNursingNote['noteType']) => boolean;
+  markOutpatientServiceExecuted: (tokenId: string, lineItemId: string, notes?: string) => boolean;
   updateTokenDoctorOrders: (tokenId: string, orders: TokenDoctorOrder) => void;
   recordTokenLineItemInsuranceResponse: (
     tokenId: string,
@@ -387,7 +258,8 @@ interface HospitalContextType {
   ) => boolean;
   overrideTokenLineItemToSelfPay: (tokenId: string, lineItemId: string, reason: string) => boolean;
   settleTokenBilling: (tokenId: string, billing: TokenBillingSummary) => void;
-  completeTokenDiagnosticReport: (tokenId: string, report: TokenDiagnosticReport) => void;
+  completeTokenDiagnosticReport: (tokenId: string, report: TokenDiagnosticReport) => boolean;
+  acknowledgeTokenDiagnosticResult: (tokenId: string, lineItemId: string) => boolean;
   updateLabOrderStatus: (
     tokenId: string,
     requestId: string,
@@ -406,6 +278,7 @@ interface HospitalContextType {
       findings?: string;
       notes?: string;
       technicianName?: string;
+      reportFiles?: TokenServiceResult['reportFiles'];
     }
   ) => void;
   addEncounterDocument: (tokenId: string, document: Pick<EncounterDocumentAttachment, 'fileName' | 'mimeType' | 'dataUrl'>) => boolean;
@@ -3369,7 +3242,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return {
             ...tok,
             status,
-            calledAt: status === 'In Consultation' ? now : tok.calledAt,
+            calledAt: status === 'In Triage' || status === 'In Consultation' ? timestamp.toISOString() : tok.calledAt,
             completedAt: status === 'Completed' ? now : tok.completedAt,
             historyLogs: [...(tok.historyLogs || []), logItem],
           };
@@ -3432,6 +3305,10 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const updateTokenVitals = (tokenId: string, vitals: TokenVitalsRecord, serviceItems?: TokenServiceItem[]) => {
+    if (!['nurse', 'admin'].includes(currentRole)) {
+      addNotification('Vitals Not Saved', 'Only nursing staff can record visit-token vitals.', 'warning', tokenId);
+      return false;
+    }
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     setReceptionTokens((prev) =>
       prev.map((tok) => {
@@ -3451,7 +3328,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               ? { lineItems: appendTokenLineItems(tok.lineItems, createServiceLineItems(tok, serviceItems)) }
               : {}),
             currentStage: needsCashier ? '4_CASHIER_BILLING' : '3_DOCTOR_EMR',
-            status: 'Waiting',
+            status: tok.status === 'Waiting' ? 'In Triage' : tok.status,
             counterOrRoom: needsCashier ? 'Cashier Counter' : 'Doctor Consultation Suite',
             historyLogs: tok.historyLogs ? [...tok.historyLogs, logItem] : [logItem],
           };
@@ -3469,6 +3346,9 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         spO2: vitals.spO2,
         temperature: vitals.temperature,
         respiratoryRate: vitals.respiratoryRate,
+        heightCm: vitals.heightCm,
+        weightKg: vitals.weightKg,
+        bmi: vitals.bmi,
       });
     }
 
@@ -3477,6 +3357,92 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       `Vitals captured for Token ${tokenId}. Patient forwarded to Doctor EMR queue.`,
       'success'
     );
+    return true;
+  };
+
+  const addTokenNursingNote = (
+    tokenId: string,
+    note: string,
+    noteType: TokenNursingNote['noteType'] = 'Progress'
+  ): boolean => {
+    if (!['nurse', 'admin'].includes(currentRole) || !note.trim()) {
+      addNotification('Nurse Note Not Saved', 'Enter a note; only nursing staff can add dated nurse notes to the visit.', 'warning', tokenId);
+      return false;
+    }
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    if (!token) {
+      addNotification('Nurse Note Not Saved', 'The visit token could not be found.', 'warning', tokenId);
+      return false;
+    }
+    const recordedAt = new Date().toISOString();
+    const entry: TokenNursingNote = {
+      id: `${tokenId}-N-${Date.now()}`,
+      note: note.trim(),
+      nurseId: currentUser.id,
+      nurseName: currentUser.name,
+      recordedAt,
+      noteType,
+    };
+    setReceptionTokens((previous) => previous.map((item) => item.id === tokenId ? {
+      ...item,
+      nursingNotes: [...(item.nursingNotes || []), entry],
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: item.currentStage || '2_NURSING_VITALS',
+          timestamp: recordedAt,
+          action: `${noteType === 'Discharge' ? 'Discharge' : 'Nursing progress'} note added to this visit.`,
+          actor: currentUser.name,
+        },
+      ],
+    } : item));
+    addNotification('Nurse Note Saved', `A dated nursing note was added to Token ${token.tokenNumber}.`, 'success', tokenId);
+    logAuditEvent('CREATE', 'Patient Record', token.patientId, `Nurse ${currentUser.name} added a dated progress note to visit token ${tokenId}.`, 'HIPAA Access Log');
+    return true;
+  };
+
+  const markOutpatientServiceExecuted = (tokenId: string, lineItemId: string, notes = ''): boolean => {
+    if (!['nurse', 'admin'].includes(currentRole)) {
+      addNotification('Treatment Not Completed', 'Only nursing staff can complete outpatient treatment services.', 'warning', tokenId);
+      return false;
+    }
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    const lineItem = token?.lineItems?.find((item) => item.id === lineItemId);
+    if (!token || !lineItem || !canExecuteOutpatientTreatment(token, lineItem)) {
+      addNotification('Treatment Not Completed', 'This service must be approved or cash-settled and ready before execution.', 'warning', tokenId);
+      return false;
+    }
+    const executedAt = new Date().toISOString();
+    const hasRemainingReadyTreatment = (token.lineItems || []).some((item) =>
+      item.id !== lineItemId && canExecuteOutpatientTreatment(token, item)
+    );
+    setReceptionTokens((previous) => previous.map((item) => item.id !== tokenId ? item : {
+      ...item,
+      status: hasRemainingReadyTreatment ? 'Ready for Treatment' : 'In Consultation',
+      lineItems: item.lineItems?.map((service) => service.id === lineItemId ? {
+        ...service,
+        executionStatus: 'COMPLETED',
+        fulfillmentStatus: 'Completed',
+        treatmentExecution: {
+          executedAt,
+          executedBy: currentUser.id,
+          executedByName: currentUser.name,
+          ...(notes.trim() ? { notes: notes.trim() } : {}),
+        },
+      } : service),
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: '5_DIAGNOSTICS_PROCEDURES',
+          timestamp: executedAt,
+          action: `Outpatient treatment completed: ${lineItem.name}.`,
+          actor: currentUser.name,
+        },
+      ],
+    }));
+    addNotification('Treatment Completed', `${lineItem.name} was marked completed for Token ${token.tokenNumber}.`, 'success', tokenId);
+    logAuditEvent('UPDATE', 'Patient Record', token.patientId, `Nurse ${currentUser.name} completed ${lineItem.name} on visit token ${tokenId}.`, 'HIPAA Access Log');
+    return true;
   };
 
   const updateTokenDoctorOrders = (tokenId: string, orders: TokenDoctorOrder) => {
@@ -3488,19 +3454,20 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setReceptionTokens((prev) =>
       prev.map((tok) => {
         if (tok.id === tokenId) {
+          const isEditingExistingEmr = Boolean(tok.doctorOrders);
           const logItem = {
             stage: '3_DOCTOR_EMR' as TokenWorkflowStage,
             timestamp: now,
-            action: `Doctor orders entered: ${orders.diagnoses.map((d) => d.code).join(', ')}. ${orders.labRequests.length} labs, ${orders.radiologyRequests.length} radiology, ${orders.procedureRequests.length} CPT procedures`,
+            action: `${isEditingExistingEmr ? 'Doctor EMR updated' : 'Doctor orders entered'}: ${orders.diagnoses.map((d) => d.code).join(', ')}. ${orders.labRequests.length} labs, ${orders.radiologyRequests.length} radiology, ${orders.procedureRequests.length} CPT procedures`,
             actor: orders.orderedByDoctorName,
           };
           return {
             ...tok,
             doctorOrders: orders,
             lineItems: appendTokenLineItems(tok.lineItems, createDoctorOrderLineItems(tok, orders)),
-            currentStage: '4_CASHIER_BILLING', // Auto-advances to Cashier!
-            status: 'Waiting',
-            counterOrRoom: 'Cashier Counter',
+            currentStage: isEditingExistingEmr ? tok.currentStage : '4_CASHIER_BILLING',
+            status: isEditingExistingEmr ? tok.status : 'Waiting',
+            counterOrRoom: isEditingExistingEmr ? tok.counterOrRoom : 'Cashier Counter',
             historyLogs: tok.historyLogs ? [...tok.historyLogs, logItem] : [logItem],
           };
         }
@@ -3511,20 +3478,44 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const targetToken = receptionTokens.find((t) => t.id === tokenId);
     if (targetToken && targetToken.patientId && targetToken.patientId !== 'WALK-IN') {
       if (orders.clinicalAssessment || orders.healthSummary) {
-        addClinicalNote(targetToken.patientId, {
+        const noteUpdate = {
           doctorName: orders.orderedByDoctorName,
           doctorSpecialty: targetToken.department,
           encounterTokenId: tokenId,
           chiefComplaint: orders.chiefComplaint || 'Clinical Consultation',
-          assessment: orders.clinicalAssessment || orders.healthSummary || 'Encounter documented',
-          treatmentPlan: `Orders: ${[
+          assessment: orders.soapNotes?.assessment || orders.clinicalAssessment || orders.healthSummary || 'Encounter documented',
+          treatmentPlan: orders.soapNotes?.plan || `Orders: ${[
             ...orders.labRequests.map((l) => l.testName),
             ...orders.radiologyRequests.map((r) => r.studyName),
             ...orders.procedureRequests.map((p) => p.procedureName),
           ].join(', ')}`,
           diagnosisCode: orders.diagnoses[0]?.code ? `ICD-10 ${orders.diagnoses[0].code}` : undefined,
           diagnoses: orders.diagnoses.map((diagnosis) => `${diagnosis.code} ${diagnosis.description}`),
-        });
+          content: [
+            orders.soapNotes?.subjective && `Subjective: ${orders.soapNotes.subjective}`,
+            orders.soapNotes?.objective && `Objective: ${orders.soapNotes.objective}`,
+            orders.soapNotes?.assessment && `Assessment: ${orders.soapNotes.assessment}`,
+            orders.soapNotes?.plan && `Plan: ${orders.soapNotes.plan}`,
+          ].filter(Boolean).join('\n\n') || orders.clinicalAssessment || orders.healthSummary,
+        };
+        const patient = patients.find((item) => item.id === targetToken.patientId);
+        const existingEmrNote = patient?.clinicalNotes?.find((note) =>
+          note.encounterTokenId === tokenId && !/nurse|nursing/i.test(`${note.authorRole || ''} ${note.doctorSpecialty || ''}`)
+        );
+        if (existingEmrNote) {
+          setPatients((previous) => previous.map((item) => item.id !== targetToken.patientId ? item : {
+            ...item,
+            clinicalNotes: (item.clinicalNotes || []).map((note) => note.id !== existingEmrNote.id ? note : {
+              ...note,
+              ...noteUpdate,
+              content: noteUpdate.content || noteUpdate.assessment,
+              date: new Date().toISOString().slice(0, 10),
+            }),
+            updatedAt: new Date().toISOString(),
+          }));
+        } else {
+          addClinicalNote(targetToken.patientId, noteUpdate);
+        }
       }
     }
 
@@ -3555,6 +3546,9 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const orderedLineItem: TokenLineItem = {
       ...item,
       insuranceStatus,
+      executionStatus: ['Lab', 'Radiology', 'Procedure', 'Service', 'Medication'].includes(item.kind)
+        ? 'PENDING_SETTLEMENT'
+        : item.executionStatus,
       fulfillmentStatus: 'Ordered',
       paymentOverride: isSelfPayToken(token)
         ? {
@@ -3673,6 +3667,10 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const settleTokenBilling = (tokenId: string, billing: TokenBillingSummary) => {
+    if (!['admin', 'receptionist'].includes(currentRole)) {
+      addNotification('Billing Not Settled', 'Only billing-capable staff can settle visit-token services.', 'warning', tokenId);
+      return;
+    }
     const token = receptionTokens.find((item) => item.id === tokenId);
     if (!token) {
       addNotification('Billing Not Settled', 'The visit token could not be found.', 'warning', tokenId);
@@ -3700,8 +3698,9 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       copayAmount: totals.copayAmount,
       totalPaid: totals.patientShare,
       balanceDue: 0,
-      paymentStatus: 'Paid',
+      paymentStatus: 'SETTLED',
     };
+    const settledLineItems = settleServiceLineItems(lineItems);
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     setReceptionTokens((prev) =>
       prev.map((tok) => {
@@ -3713,16 +3712,13 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             actor: finalizedBilling.cashierName,
           };
 
-          const hasDiagnostics =
-            (tok.doctorOrders?.labRequests && tok.doctorOrders.labRequests.length > 0) ||
-            (tok.doctorOrders?.radiologyRequests && tok.doctorOrders.radiologyRequests.length > 0) ||
-            (tok.doctorOrders?.procedureRequests && tok.doctorOrders.procedureRequests.length > 0);
+          const hasDiagnostics = settledLineItems.some((item) => item.executionStatus === 'READY_FOR_EXECUTION');
 
           const nextStage: TokenWorkflowStage = hasDiagnostics ? '5_DIAGNOSTICS_PROCEDURES' : '6_COMPLETED_REPORTS';
 
           return {
             ...tok,
-            lineItems,
+            lineItems: settledLineItems,
             billingSummary: finalizedBilling,
             currentStage: nextStage,
             status: hasDiagnostics ? 'Waiting' : 'Completed',
@@ -3742,29 +3738,55 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
   };
 
-  const completeTokenDiagnosticReport = (tokenId: string, report: TokenDiagnosticReport) => {
+  const completeTokenDiagnosticReport = (tokenId: string, report: TokenDiagnosticReport): boolean => {
+    if (!['admin', 'nurse', 'lab', 'radiology'].includes(currentRole)) {
+      addNotification('Report Submission Blocked', 'Only service-department staff can submit visit results.', 'warning', tokenId);
+      return false;
+    }
     const tokenForReport = receptionTokens.find((item) => item.id === tokenId);
     const reportLineItem = tokenForReport?.lineItems?.find((item) =>
-      item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase()
+      report.lineItemId ? item.id === report.lineItemId : item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase()
     ) || (tokenForReport?.doctorOrders
       ? createDoctorOrderLineItems(tokenForReport, tokenForReport.doctorOrders).find((item) =>
           item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase()
         )
       : undefined);
-    if (!canExecuteDiagnosticLineItem(reportLineItem)) {
+    if (!canRoleExecuteServiceLineItem(reportLineItem, currentRole)) {
       addNotification(
         'Diagnostic Execution Blocked',
-        `The token line item for ${report.testOrStudyName} is not authorized for execution.`,
+        `The token line item for ${report.testOrStudyName} is not settled and ready for execution.`,
         'warning',
         tokenId
       );
-      return;
+      return false;
     }
     const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
     setReceptionTokens((prev) =>
       prev.map((tok) => {
         if (tok.id === tokenId) {
           const updatedReports = tok.diagnosticReports ? [...tok.diagnosticReports, report] : [report];
+          const updatedLineItems = (tok.lineItems?.length ? tok.lineItems : (tok.doctorOrders
+            ? createDoctorOrderLineItems(tok, tok.doctorOrders)
+            : [])).map((item) => (report.lineItemId ? item.id === report.lineItemId : item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase())
+            ? {
+                ...item,
+                executionStatus: 'COMPLETED' as const,
+                fulfillmentStatus: 'Completed' as const,
+                resultPayload: {
+                  value: report.resultValue,
+                  findings: report.findings,
+                  impression: report.impression,
+                  referenceRange: report.referenceRange,
+                  status: report.status,
+                  reportFiles: report.reportFiles,
+                  submittedAt: new Date().toISOString(),
+                  submittedBy: report.technicianOrRadiologist,
+                },
+              }
+            : item);
+          const allExecutableServicesComplete = updatedLineItems
+            .filter((item) => item.executionStatus && canExecuteDiagnosticLineItem(item))
+            .every((item) => item.executionStatus === 'COMPLETED');
           const logItem = {
             stage: '5_DIAGNOSTICS_PROCEDURES' as TokenWorkflowStage,
             timestamp: now,
@@ -3774,14 +3796,10 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return {
             ...tok,
             diagnosticReports: updatedReports,
-            lineItems: (tok.lineItems?.length ? tok.lineItems : (tok.doctorOrders
-              ? createDoctorOrderLineItems(tok, tok.doctorOrders)
-              : [])).map((item) => item.name.trim().toLowerCase() === report.testOrStudyName.trim().toLowerCase()
-              ? { ...item, fulfillmentStatus: 'Completed' }
-              : item),
-            currentStage: '6_COMPLETED_REPORTS',
-            status: 'Completed',
-            completedAt: now,
+            lineItems: updatedLineItems,
+            currentStage: allExecutableServicesComplete ? '6_COMPLETED_REPORTS' : '5_DIAGNOSTICS_PROCEDURES',
+            status: allExecutableServicesComplete ? 'Completed' : 'Waiting',
+            completedAt: allExecutableServicesComplete ? now : tok.completedAt,
             historyLogs: tok.historyLogs ? [...tok.historyLogs, logItem] : [logItem],
           };
         }
@@ -3809,6 +3827,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         sentToPatient: true,
         sentToDoctor: true,
         sentDate: `${new Date().toISOString().split('T')[0]} ${now}`,
+        reportFiles: report.reportFiles,
       };
       addLabResult(targetToken.patientId, newLabResult);
     }
@@ -3820,6 +3839,51 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         'success'
       );
     }
+    return true;
+  };
+
+  const acknowledgeTokenDiagnosticResult = (tokenId: string, lineItemId: string): boolean => {
+    if (currentRole !== 'doctor') {
+      addNotification('Result Acknowledgement Blocked', 'Only the requesting physician can acknowledge a result.', 'warning', tokenId);
+      return false;
+    }
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    if (!token || !(token.doctorId === currentUser.id ||
+      token.doctorOrders?.orderedByDoctorId === currentUser.id ||
+      token.doctorOrders?.orderedByDoctorName === currentUser.name)) {
+      addNotification('Result Acknowledgement Blocked', 'This result is not assigned to your doctor account.', 'warning', tokenId);
+      return false;
+    }
+    const lineItem = token.lineItems?.find((item) => item.id === lineItemId);
+    if (!lineItem || lineItem.executionStatus !== 'COMPLETED' || !lineItem.resultPayload) {
+      addNotification('Result Acknowledgement Blocked', 'The completed result could not be found on this visit token.', 'warning', tokenId);
+      return false;
+    }
+    const acknowledgedAt = new Date().toISOString();
+    setReceptionTokens((previous) => previous.map((item) => item.id !== tokenId ? item : {
+      ...item,
+      lineItems: (item.lineItems || []).map((line) => line.id !== lineItemId || !line.resultPayload
+        ? line
+        : {
+            ...line,
+            resultPayload: {
+              ...line.resultPayload,
+              acknowledgedAt,
+              acknowledgedBy: currentUser.name,
+            },
+          }),
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: '6_COMPLETED_REPORTS',
+          timestamp: acknowledgedAt,
+          action: `Result acknowledged: ${lineItem.name}.`,
+          actor: currentUser.name,
+        },
+      ],
+    }));
+    addNotification('Result Acknowledged', `${lineItem.name} result acknowledged for Token ${token.tokenNumber}.`, 'success', tokenId);
+    return true;
   };
 
   const updateLabOrderStatus = (
@@ -3828,15 +3892,23 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     status: 'Ordered' | 'Sample Collected' | 'Completed',
     notes?: string
   ) => {
+    if (status === 'Completed') {
+      addNotification('Lab Result Required', 'Submit the result payload to complete this service order.', 'warning', tokenId);
+      return;
+    }
+    if (!['admin', 'nurse', 'lab', 'radiology'].includes(currentRole)) {
+      addNotification('Lab Execution Blocked', 'Only nursing and laboratory staff can update sample progress.', 'warning', tokenId);
+      return;
+    }
     const token = receptionTokens.find((item) => item.id === tokenId);
     const lineItem = token?.lineItems?.find((item) => item.id === requestId) ||
       (token?.doctorOrders
         ? createDoctorOrderLineItems(token, token.doctorOrders).find((item) => item.id === requestId)
         : undefined);
-    if (!canExecuteDiagnosticLineItem(lineItem)) {
+    if (!canRoleExecuteServiceLineItem(lineItem, currentRole)) {
       addNotification(
         'Lab Execution Blocked',
-        `Authorization for ${lineItem?.name || 'this test'} is ${lineItem?.insuranceStatus || 'missing'}. Approval or a documented self-pay override is required.`,
+        `${lineItem?.name || 'This test'} has not been settled and released for execution.`,
         'warning',
         tokenId
       );
@@ -3871,7 +3943,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             },
             lineItems: (tok.lineItems?.length ? tok.lineItems : createDoctorOrderLineItems(tok, tok.doctorOrders)).map((item) =>
               item.id === requestId
-                ? { ...item, fulfillmentStatus: status === 'Completed' ? 'Completed' : status === 'Sample Collected' ? 'In Progress' : 'Ordered' }
+                ? { ...item, fulfillmentStatus: status === 'Sample Collected' ? 'In Progress' : 'Ordered' }
                 : item
             ),
             historyLogs: tok.historyLogs ? [...tok.historyLogs, logItem] : [logItem],
@@ -3884,7 +3956,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     addNotification(
       'Lab Order Status Updated',
       `${testName} is now marked as "${status}" for Token ${tokenId}.`,
-      status === 'Completed' ? 'success' : 'info'
+      'info'
     );
   };
 
@@ -3900,17 +3972,22 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       findings?: string;
       notes?: string;
       technicianName?: string;
+      reportFiles?: TokenServiceResult['reportFiles'];
     }
   ) => {
+    if (!['admin', 'nurse', 'lab', 'radiology'].includes(currentRole)) {
+      addNotification('Lab Result Blocked', 'Only nursing and service-department staff can submit results.', 'warning', tokenId);
+      return;
+    }
     const token = receptionTokens.find((item) => item.id === tokenId);
     const lineItem = token?.lineItems?.find((item) => item.id === requestId) ||
       (token?.doctorOrders
         ? createDoctorOrderLineItems(token, token.doctorOrders).find((item) => item.id === requestId)
         : undefined);
-    if (!canExecuteDiagnosticLineItem(lineItem)) {
+    if (!canRoleExecuteServiceLineItem(lineItem, currentRole)) {
       addNotification(
         'Lab Result Blocked',
-        `Authorization for ${lineItem?.name || resultData.testName} is ${lineItem?.insuranceStatus || 'missing'}. Approval or a documented self-pay override is required.`,
+        `${lineItem?.name || resultData.testName} has not been settled and released for execution.`,
         'warning',
         tokenId
       );
@@ -3921,8 +3998,13 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const diagnosticReport: TokenDiagnosticReport = {
       id: `REP-${Date.now().toString().slice(-6)}`,
+      lineItemId: requestId,
       testOrStudyName: resultData.testName,
-      department: 'Laboratory',
+      department: lineItem?.kind === 'Radiology'
+        ? 'Radiology'
+        : lineItem?.kind === 'Procedure' || lineItem?.kind === 'Service'
+          ? 'Cardiology / Procedures'
+          : 'Laboratory',
       category: resultData.category || 'Biochemistry',
       date: nowDate,
       time: nowTime,
@@ -3957,23 +4039,44 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             action: `Lab result recorded for ${resultData.testName}: ${resultData.value} (${resultData.status})`,
             actor: resultData.technicianName || currentUser?.name || 'Lab Technician',
           };
+          const updatedLineItems = (tok.lineItems?.length ? tok.lineItems : createDoctorOrderLineItems(tok, tok.doctorOrders || {
+            diagnoses: [],
+            labRequests: [],
+            radiologyRequests: [],
+            procedureRequests: [],
+            consultationFee: 0,
+            orderedByDoctorId: '',
+            orderedByDoctorName: '',
+            orderedAt: nowTime,
+          })).map((item) => item.id === requestId ? {
+            ...item,
+            executionStatus: 'COMPLETED' as const,
+            fulfillmentStatus: 'Completed' as const,
+            resultPayload: {
+              value: resultData.value,
+              referenceRange: resultData.referenceRange,
+              findings: resultData.findings,
+              impression: resultData.notes,
+              status: resultData.status,
+              reportFiles: resultData.reportFiles,
+              submittedAt: new Date().toISOString(),
+              submittedBy: resultData.technicianName || currentUser?.name || 'Lab Technician',
+            },
+          } : item);
+          const allExecutableServicesComplete = updatedLineItems
+            .filter((item) => item.executionStatus && canExecuteDiagnosticLineItem(item))
+            .every((item) => item.executionStatus === 'COMPLETED');
 
           return {
             ...tok,
             doctorOrders: tok.doctorOrders
               ? { ...tok.doctorOrders, labRequests: updatedLabRequests }
               : undefined,
-            lineItems: (tok.lineItems?.length ? tok.lineItems : createDoctorOrderLineItems(tok, tok.doctorOrders || {
-              diagnoses: [],
-              labRequests: [],
-              radiologyRequests: [],
-              procedureRequests: [],
-              consultationFee: 0,
-              orderedByDoctorId: '',
-              orderedByDoctorName: '',
-              orderedAt: nowTime,
-            })).map((item) => item.id === requestId ? { ...item, fulfillmentStatus: 'Completed' } : item),
+            lineItems: updatedLineItems,
             diagnosticReports: updatedReports,
+            currentStage: allExecutableServicesComplete ? '6_COMPLETED_REPORTS' : '5_DIAGNOSTICS_PROCEDURES',
+            status: allExecutableServicesComplete ? 'Completed' : 'Waiting',
+            completedAt: allExecutableServicesComplete ? nowTime : tok.completedAt,
             historyLogs: tok.historyLogs ? [...tok.historyLogs, logItem] : [logItem],
           };
         }
@@ -3983,11 +4086,23 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const targetToken = receptionTokens.find((t) => t.id === tokenId);
     if (targetToken?.patientId && targetToken.patientId !== 'WALK-IN') {
+      const resultCategory: LabResult['category'] = ['Hematology', 'Radiology', 'Biochemistry', 'Pathology', 'Cardiology']
+        .includes(resultData.category || '')
+        ? resultData.category as LabResult['category']
+        : lineItem?.kind === 'Radiology'
+          ? 'Radiology'
+          : lineItem?.kind === 'Procedure' || lineItem?.kind === 'Service'
+            ? 'Cardiology'
+            : 'Biochemistry';
       const newLabResult: Omit<LabResult, 'id'> = {
         encounterTokenId: targetToken.id,
         testName: resultData.testName,
-        category: (resultData.category as any) || 'Biochemistry',
-        department: 'Laboratory',
+        category: resultCategory,
+        department: lineItem?.kind === 'Radiology'
+          ? 'Radiology & Imaging'
+          : lineItem?.kind === 'Procedure' || lineItem?.kind === 'Service'
+            ? 'Cardiology / Procedures'
+            : 'Laboratory',
         orderedDate: targetToken.visitDate || nowDate,
         resultDate: nowDate,
         status: resultData.status,
@@ -4000,6 +4115,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         sentToPatient: true,
         sentToDoctor: true,
         sentDate: `${nowDate} ${nowTime}`,
+        reportFiles: resultData.reportFiles,
       };
       addLabResult(targetToken.patientId, newLabResult);
     }
@@ -4473,7 +4589,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if ((tokenMedication || encounterTokenId) && !canDispenseMedicationLineItem(tokenLineItem)) {
       return {
         success: false,
-        error: `Dispensing blocked: ${tokenLineItem?.insuranceStatus || 'authorization status missing'}. Pharmacy requires Approved status or a documented Self_Pay override.`,
+        error: `Dispensing blocked: ${tokenLineItem?.executionStatus || 'settlement pending'} / ${tokenLineItem?.insuranceStatus || 'authorization status missing'}. Pharmacy requires a settled order with Approved status or a documented Self_Pay override.`,
       };
     }
     const rxName = rx?.name || tokenMedication?.medicationName || tokenLineItem?.name || 'Medication';
@@ -5043,6 +5159,8 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateReceptionTokenStatus,
         advanceTokenWorkflow,
         updateTokenVitals,
+        addTokenNursingNote,
+        markOutpatientServiceExecuted,
         updateTokenDoctorOrders,
         recordTokenLineItemInsuranceResponse,
         submitTokenLineItemAppeal,
@@ -5050,6 +5168,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         overrideTokenLineItemToSelfPay,
         settleTokenBilling,
         completeTokenDiagnosticReport,
+        acknowledgeTokenDiagnosticResult,
         updateLabOrderStatus,
         recordLabTestResult,
         addEncounterDocument,
