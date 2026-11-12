@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { AlertCircle, CalendarCheck, CheckCircle2, Edit3, Eraser, FileText, MapPin, Phone, Printer, Save, Search, Ticket, UserPlus, UserRound, Video, X } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
-import { Appointment, Patient, PaymentSchemeType, ReceptionToken, TokenPaymentScheme } from '../types';
+import { Appointment, DoctorPackage, Patient, PaymentSchemeType, ReceptionToken, TokenPaymentScheme } from '../types';
 import { printReceptionToken } from '../utils/printReceptionToken';
 import { parseInsuranceDeductible } from '../utils/insuranceInvoice';
 import { PatientAvatar } from './PatientAvatar';
@@ -18,6 +18,8 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
   const {
     patients,
     doctors,
+    doctorPackages,
+    currentUser,
     appointments,
     receptionTokens,
     createReceptionToken,
@@ -183,18 +185,9 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
     setSaving(false);
   };
 
-  const saveExistingPatientToken = () => {
+  const saveExistingPatientToken = (packageOption?: DoctorPackage) => {
     if (!selectedPatient) {
       addNotification('Select Patient', 'Choose an existing patient before saving registration.', 'warning');
-      return;
-    }
-
-    if (paymentSchemeType === 'Insurance' && (!visitInsuranceProvider.trim() || !visitInsurancePolicyNumber.trim())) {
-      addNotification('Insurance Details Required', 'Enter the insurance provider and policy number for this visit.', 'warning', selectedPatient.id);
-      return;
-    }
-    if (paymentSchemeType !== 'Insurance' && paymentSchemeType !== 'Self-Pay' && !paymentDetails.trim()) {
-      addNotification('Payment Details Required', `Enter the ${paymentSchemeType === 'Discount Card' ? 'discount card' : paymentSchemeType === 'Corporate' ? 'corporate payer' : 'package'} name or number.`, 'warning', selectedPatient.id);
       return;
     }
 
@@ -202,6 +195,31 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
       doctors.find((doctor) => doctor.id === assignedDoctorId) ||
       doctors.find((doctor) => doctor.id === selectedPatient.primaryPhysicianId) ||
       doctors[0];
+    const currentVisitDate = new Date();
+    const visitDate = `${currentVisitDate.getFullYear()}-${String(currentVisitDate.getMonth() + 1).padStart(2, '0')}-${String(currentVisitDate.getDate()).padStart(2, '0')}`;
+    const selectedDoctorPackage = packageOption && doctorPackages.find((item) => item.id === packageOption.id);
+    if (packageOption && (
+      registrationType === 'Technician' ||
+      !selectedDoctorPackage ||
+      !selectedDoctorPackage.isActive ||
+      selectedDoctorPackage.doctorId !== assignedDoctor?.id ||
+      selectedDoctorPackage.validFrom > visitDate ||
+      selectedDoctorPackage.validUntil < visitDate
+    )) {
+      addNotification('Package No Longer Available', 'The selected package is no longer active for this doctor or visit date. Please choose another package.', 'warning', selectedPatient.id);
+      return;
+    }
+    const appliedPackage = packageOption ? selectedDoctorPackage : undefined;
+
+    if (!appliedPackage && paymentSchemeType === 'Insurance' && (!visitInsuranceProvider.trim() || !visitInsurancePolicyNumber.trim())) {
+      addNotification('Insurance Details Required', 'Enter the insurance provider and policy number for this visit.', 'warning', selectedPatient.id);
+      return;
+    }
+    if (!appliedPackage && paymentSchemeType !== 'Insurance' && paymentSchemeType !== 'Self-Pay' && !paymentDetails.trim()) {
+      addNotification('Payment Details Required', `Enter the ${paymentSchemeType === 'Discount Card' ? 'discount card' : paymentSchemeType === 'Corporate' ? 'corporate payer' : 'package'} name or number.`, 'warning', selectedPatient.id);
+      return;
+    }
+
     const physioOptions = ['Ahmed Hassan - Physiotherapy Technician', 'Zainab Noor - Physiotherapy Technician', 'Nadia Salem - Physiotherapy Technician'];
     const selectedPhysio = physioOptions.includes(physioTechnician) ? physioTechnician : physioOptions[0];
     const walkInDepartment =
@@ -212,16 +230,15 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
         : registrationType === 'Technician'
         ? 'Physio Technician'
         : 'Billing & Cashier';
-    const currentVisitDate = new Date();
-    const visitDate = `${currentVisitDate.getFullYear()}-${String(currentVisitDate.getMonth() + 1).padStart(2, '0')}-${String(currentVisitDate.getDate()).padStart(2, '0')}`;
     const providerId = registrationType === 'Technician' ? undefined : assignedDoctor?.id || selectedPatient.primaryPhysicianId;
     const providerName = registrationType === 'Technician'
       ? selectedPhysio
       : assignedDoctor?.name || selectedPatient.primaryPhysicianName || 'Registration Desk';
     setSaving(true);
     const walkInPurpose = selectedPatient.purposeOfVisit || (registrationType === 'Consultation' ? 'Walk-in consultation' : registrationType === 'Technician' ? 'Physiotherapy treatment session' : 'Administrative registration & billing');
-    const normalizedCoverage = Math.min(100, Math.max(0, Number(coveragePercent) || 0));
-    const paymentScheme: TokenPaymentScheme = paymentSchemeType === 'Insurance'
+    const effectiveSchemeType: PaymentSchemeType = appliedPackage ? 'Package' : paymentSchemeType;
+    const normalizedCoverage = Math.min(100, Math.max(0, Number(appliedPackage?.coveragePercent ?? coveragePercent) || 0));
+    const paymentScheme: TokenPaymentScheme = effectiveSchemeType === 'Insurance'
       ? {
           schemeType: 'Insurance',
           insuranceProvider: visitInsuranceProvider.trim(),
@@ -234,23 +251,35 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
           deductibleAmount: selectedPatient.insurance.deductibleAmount ||
             parseInsuranceDeductible(selectedPatient.insuranceList?.find((record) => record.isPrimary)?.copayDeductible),
         }
-      : paymentSchemeType === 'Discount Card'
+      : effectiveSchemeType === 'Discount Card'
       ? { schemeType: 'Discount Card', discountCardName: paymentDetails.trim(), discountCardNumber: paymentDetails.trim(), discountPercent: normalizedCoverage }
-      : paymentSchemeType === 'Corporate'
+      : effectiveSchemeType === 'Corporate'
       ? { schemeType: 'Corporate', corporateName: paymentDetails.trim(), corporateNumber: paymentDetails.trim(), coveragePercent: normalizedCoverage }
-      : paymentSchemeType === 'Package'
-      ? { schemeType: 'Package', packageName: paymentDetails.trim(), packageNumber: paymentDetails.trim(), coveragePercent: normalizedCoverage }
+      : effectiveSchemeType === 'Package'
+      ? {
+          schemeType: 'Package',
+          packageName: appliedPackage?.packageName || paymentDetails.trim(),
+          packageNumber: appliedPackage?.packageNumber || paymentDetails.trim(),
+          coveragePercent: normalizedCoverage,
+          packageId: appliedPackage?.id,
+          doctorId: appliedPackage?.doctorId,
+          packageBasePrice: appliedPackage?.basePrice,
+          validFrom: appliedPackage?.validFrom,
+          validUntil: appliedPackage?.validUntil,
+        }
       : { schemeType: 'Self-Pay' };
-    const visitInsuranceProviderName = paymentSchemeType === 'Insurance'
+    const visitInsuranceProviderName = appliedPackage
+      ? appliedPackage.packageName
+      : paymentSchemeType === 'Insurance'
       ? visitInsuranceProvider.trim()
       : paymentSchemeType === 'Self-Pay'
       ? 'Self-Pay'
       : paymentDetails.trim();
-    const visitPayMode: NonNullable<ReceptionToken['payMode']> = paymentSchemeType === 'Self-Pay'
+    const visitPayMode: NonNullable<ReceptionToken['payMode']> = effectiveSchemeType === 'Self-Pay'
       ? 'Self'
-      : paymentSchemeType === 'Discount Card'
+      : effectiveSchemeType === 'Discount Card'
       ? 'Discount Card'
-      : paymentSchemeType === 'Corporate' || paymentSchemeType === 'Package'
+      : effectiveSchemeType === 'Corporate' || effectiveSchemeType === 'Package'
       ? 'Company'
       : 'Insurance';
     const emergencyContact = {
@@ -263,7 +292,38 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
           .map((service) => service.id)
       : [];
 
-    updatePatient(selectedPatient.id, { isTelehealthPatient });
+    const existingPackageAssignment = appliedPackage && selectedPatient.packageAssignments?.find((assignment) =>
+      assignment.doctorPackageId === appliedPackage.id &&
+      assignment.validFrom <= visitDate &&
+      assignment.validUntil >= visitDate
+    );
+    updatePatient(selectedPatient.id, {
+      isTelehealthPatient,
+      ...(appliedPackage ? {
+        hasPackage: true,
+        selectedPackage: appliedPackage.packageName,
+        packageAssignments: existingPackageAssignment
+          ? selectedPatient.packageAssignments || []
+          : [
+              ...(selectedPatient.packageAssignments || []),
+              {
+                id: `PPA-${Date.now()}`,
+                doctorPackageId: appliedPackage.id,
+                doctorId: appliedPackage.doctorId,
+                doctorName: assignedDoctor?.name || selectedPatient.primaryPhysicianName || 'Doctor',
+                packageName: appliedPackage.packageName,
+                packageNumber: appliedPackage.packageNumber,
+                coveragePercent: appliedPackage.coveragePercent,
+                assignedAt: new Date().toISOString(),
+                validFrom: appliedPackage.validFrom,
+                validUntil: appliedPackage.validUntil,
+                assignedBy: currentUser.name,
+                basePrice: appliedPackage.basePrice,
+                includedServices: appliedPackage.includedServices.map((service) => ({ ...service })),
+              },
+            ],
+      } : {}),
+    });
     const token = createReceptionToken({
       patientId: selectedPatient.id,
       patientName: `${selectedPatient.firstName} ${selectedPatient.lastName}`,
@@ -647,6 +707,7 @@ export const PatientRegistrationDesk: React.FC<PatientRegistrationDeskProps> = (
             setVisitEmergencyPhone(patient?.emergencyContact.phone || '');
           }}
           saveExistingPatientToken={saveExistingPatientToken}
+          doctorPackages={doctorPackages}
           registrationType={registrationType}
           setRegistrationType={(type: 'Consultation' | 'Non-Consultation' | 'Technician') => {
             setRegistrationType(type);
@@ -909,7 +970,37 @@ const RegistrationSection: React.FC<{ icon: React.ElementType; title: string; ch
 
 const Field: React.FC<{ label: string; placeholder: string; wide?: boolean }> = ({ label, placeholder, wide }) => <label className={`${wide ? 'sm:col-span-2 lg:col-span-2' : ''} block`}><span className="block text-[10px] font-semibold text-slate-600 mb-1">{label}</span><input placeholder={placeholder} className="w-full rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none" /></label>;
 
-const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatientQuery, filteredPatients, selectedPatientId, setSelectedPatientId, saveExistingPatientToken, registrationType, setRegistrationType, includePendingServices, setIncludePendingServices, physioTechnician, setPhysioTechnician, doctors, assignedDoctorId, setAssignedDoctorId, visitDepartment, setVisitDepartment, paymentSchemeType, setPaymentSchemeType, paymentDetails, setPaymentDetails, coveragePercent, setCoveragePercent, visitInsuranceProvider, setVisitInsuranceProvider, visitInsurancePolicyNumber, setVisitInsurancePolicyNumber, visitInsuranceNetwork, setVisitInsuranceNetwork, visitEmergencyPhone, setVisitEmergencyPhone, isTelehealthPatient, setIsTelehealthPatient, saving }) => {
+const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatientQuery, filteredPatients, selectedPatientId, setSelectedPatientId, saveExistingPatientToken, doctorPackages, registrationType, setRegistrationType, includePendingServices, setIncludePendingServices, physioTechnician, setPhysioTechnician, doctors, assignedDoctorId, setAssignedDoctorId, visitDepartment, setVisitDepartment, paymentSchemeType, setPaymentSchemeType, paymentDetails, setPaymentDetails, coveragePercent, setCoveragePercent, visitInsuranceProvider, setVisitInsuranceProvider, visitInsurancePolicyNumber, setVisitInsurancePolicyNumber, visitInsuranceNetwork, setVisitInsuranceNetwork, visitEmergencyPhone, setVisitEmergencyPhone, isTelehealthPatient, setIsTelehealthPatient, saving }) => {
+  const [packagePromptOpen, setPackagePromptOpen] = useState(false);
+  const [selectedPackageId, setSelectedPackageId] = useState('');
+  const visitDate = new Date();
+  const visitDateString = `${visitDate.getFullYear()}-${String(visitDate.getMonth() + 1).padStart(2, '0')}-${String(visitDate.getDate()).padStart(2, '0')}`;
+  const visitDoctorId = assignedDoctorId || patient?.primaryPhysicianId;
+  const eligiblePackages = registrationType === 'Technician' ? [] : doctorPackages.filter((item: DoctorPackage) =>
+    item.isActive &&
+    item.doctorId === visitDoctorId &&
+    item.validFrom <= visitDateString &&
+    item.validUntil >= visitDateString &&
+    !patient?.packageAssignments?.some((assignment: NonNullable<Patient['packageAssignments']>[number]) =>
+      assignment.doctorPackageId === item.id &&
+      assignment.validFrom <= visitDateString &&
+      assignment.validUntil >= visitDateString
+    )
+  );
+  const beginExistingVisitRegistration = () => {
+    if (eligiblePackages.length === 0) {
+      saveExistingPatientToken();
+      return;
+    }
+    setSelectedPackageId(eligiblePackages[0].id);
+    setPackagePromptOpen(true);
+  };
+  const confirmPackageAssignment = () => {
+    const selectedPackage = eligiblePackages.find((item: DoctorPackage) => item.id === selectedPackageId);
+    if (!selectedPackage) return;
+    setPackagePromptOpen(false);
+    saveExistingPatientToken(selectedPackage);
+  };
   const departments = Array.from(new Set([
     patient?.department,
     ...doctors.map((doctor: any) => doctor.department),
@@ -1100,13 +1191,36 @@ const ExistingPatientPanel: React.FC<any> = ({ patient, patientQuery, setPatient
         <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
           <button
             type="button"
-            onClick={saveExistingPatientToken}
+            onClick={beginExistingVisitRegistration}
             disabled={saving}
             className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Save className="h-3.5 w-3.5" /> {saving ? 'Saving…' : 'Save visit registration'}
           </button>
         </div>
+        {packagePromptOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-4" role="presentation">
+            <section role="dialog" aria-modal="true" aria-labelledby="package-assignment-title" className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl">
+              <h3 id="package-assignment-title" className="text-base font-bold text-slate-900">Assign a doctor package?</h3>
+              <p className="mt-1 text-xs leading-5 text-slate-600">
+                An active package is available for {doctors.find((doctor: any) => doctor.id === visitDoctorId)?.name || 'this doctor'}. Assigning it will add it to {patient.firstName} {patient.lastName}&apos;s profile and apply it to this visit.
+              </p>
+              <label className="mt-4 block text-xs font-semibold text-slate-700">
+                Available package
+                <select value={selectedPackageId} onChange={(event) => setSelectedPackageId(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs">
+                  {eligiblePackages.map((item: DoctorPackage) => (
+                    <option key={item.id} value={item.id}>{item.packageName} · {item.packageNumber} · {item.coveragePercent}% · through {item.validUntil}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <button type="button" onClick={() => setPackagePromptOpen(false)} className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">Cancel</button>
+                <button type="button" onClick={() => { setPackagePromptOpen(false); saveExistingPatientToken(); }} disabled={saving} className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">No, continue without package</button>
+                <button type="button" onClick={confirmPackageAssignment} disabled={saving || !selectedPackageId} className="rounded-md bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800 disabled:opacity-50">Assign &amp; register visit</button>
+              </div>
+            </section>
+          </div>
+        )}
       </section>
     );
   }

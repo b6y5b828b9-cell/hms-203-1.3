@@ -156,6 +156,49 @@ export interface PatientService {
   deferredAt?: string;
 }
 
+export interface PatientPackageAssignment {
+  id: string;
+  doctorPackageId: string;
+  doctorId: string;
+  doctorName: string;
+  packageName: string;
+  packageNumber: string;
+  coveragePercent: number;
+  assignedAt: string;
+  validFrom: string;
+  validUntil: string;
+  assignedBy: string;
+  basePrice?: number;
+  includedServices?: DoctorPackageService[];
+}
+
+export interface DoctorPackageService {
+  tariffItemId: string;
+  code: string;
+  name: string;
+  category: HospitalPriceItem['category'];
+  department: string;
+  cptCode?: string;
+  unitPrice: number;
+  insuranceCoveredPercent: number;
+  quota: number;
+}
+
+export interface DoctorPackage {
+  id: string;
+  doctorId: string;
+  packageName: string;
+  packageNumber: string;
+  coveragePercent: number;
+  validFrom: string;
+  validUntil: string;
+  basePrice: number;
+  includedServices: DoctorPackageService[];
+  isActive: boolean;
+  createdAt: string;
+  createdBy: string;
+}
+
 export type ServiceBillingStatus = 'Pending' | 'Billed' | 'Deferred' | 'Cancelled';
 
 export interface EncounterServiceBillingState {
@@ -351,6 +394,7 @@ export interface Patient {
   riskOfFall?: boolean;
   hasPackage?: boolean;
   selectedPackage?: string;
+  packageAssignments?: PatientPackageAssignment[];
   advanceBalance?: number;
   purposeOfVisit?: string;
   department?: string;
@@ -454,6 +498,7 @@ export interface Appointment {
   patientGender: string;
   doctorId: string;
   doctorName: string;
+  branch?: string;
   department: string;
   roomNumber: string;
   date: string; // YYYY-MM-DD
@@ -477,6 +522,10 @@ export interface Doctor {
   id: string;
   name: string;
   specialty: string;
+  degree?: string;
+  nationality?: string;
+  language?: string;
+  branch?: string;
   department: string;
   roomNumber: string;
   avatar: string;
@@ -751,6 +800,11 @@ export interface TokenPaymentScheme {
   corporateNumber?: string;
   packageName?: string;
   packageNumber?: string;
+  packageId?: string;
+  doctorId?: string;
+  validFrom?: string;
+  validUntil?: string;
+  packageBasePrice?: number;
   notes?: string;
 }
 
@@ -1176,7 +1230,7 @@ export interface AuditLog {
   userName: string;
   userRole: UserRole;
   action: 'CREATE' | 'READ' | 'UPDATE' | 'DELETE' | 'DISPENSE' | 'AUTHENTICATE' | 'CLAIM_EXPORT' | 'BACKUP_EXPORT';
-  resourceType: 'Patient Record' | 'Prescription' | 'Billing Invoice' | 'Lab Result' | 'Appointment' | 'Security Settings';
+  resourceType: 'Patient Record' | 'Prescription' | 'Billing Invoice' | 'Lab Result' | 'Appointment' | 'Doctor Profile' | 'Doctor Package' | 'Security Settings';
   resourceId: string;
   targetEntity?: string;
   targetId?: string;

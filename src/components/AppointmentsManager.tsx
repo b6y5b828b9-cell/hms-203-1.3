@@ -17,10 +17,13 @@ import {
   Ban,
   Copy,
   ClipboardPaste,
+  ChevronDown,
 } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
 import { Appointment } from '../types';
 import { getDoctorDutyWindow, getDutyAppointmentSlots } from '../utils/doctorDutySchedule';
+import { getDoctorDegree, getDoctorDisplayName } from '../utils/doctorProfile';
+import { DoctorAvatar } from './DoctorAvatar';
 
 interface AppointmentsManagerProps {
   onOpenNewAppointment: (preset?: { doctorId?: string; date?: string; timeSlot?: string }) => void;
@@ -34,6 +37,53 @@ const formatLocalDate = (date: Date) => {
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 };
+
+interface MultiSelectFilterProps {
+  label: string;
+  options: string[];
+  value: string[] | null;
+  onChange: (value: string[] | null) => void;
+  optionLabels?: Record<string, string>;
+}
+
+const MultiSelectFilter: React.FC<MultiSelectFilterProps> = ({ label, options, value, onChange, optionLabels }) => (
+  <details className="group relative min-w-40">
+    <summary className="flex min-h-9 cursor-pointer list-none items-center justify-between gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700">
+      <span>{label}</span>
+      <span className="flex items-center gap-1 text-[10px] text-slate-500">
+        {value === null ? 'All' : `${value.length} selected`}
+        <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+      </span>
+    </summary>
+    <div className="absolute left-0 z-20 mt-1 max-h-64 w-64 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 shadow-lg">
+      <button
+        type="button"
+        onClick={() => onChange(null)}
+        className="mb-1 w-full rounded px-2 py-1.5 text-left text-[11px] font-semibold text-teal-800 hover:bg-teal-50"
+      >
+        Select all {label.toLowerCase()}
+      </button>
+      {options.map((option) => (
+        <label key={option} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50">
+          <input
+            type="checkbox"
+            checked={value === null || value.includes(option)}
+            onChange={(event) => {
+              const next = value === null
+                ? options.filter((item) => item !== option)
+                : event.target.checked
+                  ? [...value, option]
+                  : value.filter((item) => item !== option);
+              onChange(next.length === options.length ? null : next);
+            }}
+            className="rounded border-slate-300 text-teal-700 focus:ring-teal-700"
+          />
+          <span>{optionLabels?.[option] || option}</span>
+        </label>
+      ))}
+    </div>
+  </details>
+);
 
 export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
   onOpenNewAppointment,
@@ -64,8 +114,9 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
   const [dateFilter, setDateFilter] = useState('');
   const [selectedDepartment, setSelectedDepartment] = useState('all');
   const [viewType, setViewType] = useState<'appointments' | 'doctor-slots'>('doctor-slots');
-  const [slotDepartment, setSlotDepartment] = useState(doctors[0]?.department || '');
-  const [slotDoctorId, setSlotDoctorId] = useState(doctors[0]?.id || '');
+  const [selectedBranches, setSelectedBranches] = useState<string[] | null>(null);
+  const [selectedSlotDepartments, setSelectedSlotDepartments] = useState<string[] | null>(null);
+  const [selectedDoctorIds, setSelectedDoctorIds] = useState<string[] | null>(null);
   const [slotDate, setSlotDate] = useState(() => formatLocalDate(new Date()));
   const [blockedSlots, setBlockedSlots] = useState<string[]>(() => {
     try {
@@ -74,7 +125,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
       return [];
     }
   });
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; slot: string } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; doctorId: string; slot: string } | null>(null);
   const [copiedAppointment, setCopiedAppointment] = useState<Appointment | null>(null);
   const [cancellationTarget, setCancellationTarget] = useState<Appointment | null>(null);
   const [cancellationReason, setCancellationReason] = useState('');
@@ -102,25 +153,49 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
   }, [contextMenu]);
 
   const departmentOptions = Array.from(new Set(appointments.map((appointment) => appointment.department))).sort();
-  const doctorDepartmentOptions = Array.from(new Set(doctors.map((doctor) => doctor.department))).sort();
-  const doctorsForSlots = doctors.filter((doctor) => doctor.department === slotDepartment);
-  const slotDoctor = doctorsForSlots.find((doctor) => doctor.id === slotDoctorId) || doctorsForSlots[0];
-  const slotDutyWindow = slotDoctor
-    ? getDoctorDutyWindow(slotDoctor, doctorDutySchedules, slotDate)
-    : { isOnDuty: false, startTime: '', endTime: '' };
-  const doctorSlots = getDutyAppointmentSlots(slotDutyWindow);
-  const bookedSlotTimes = appointments
-    .filter((appointment) => appointment.doctorId === slotDoctor?.id && appointment.date === slotDate && ['Scheduled', 'Checked-In', 'In Consultation'].includes(appointment.status))
-    .map((appointment) => appointment.timeSlot);
-  const getSlotKey = (slot: string) => `${slotDoctor?.id || ''}|${slotDate}|${slot}`;
-  const isSlotBreak = (slot: string) => blockedSlots.includes(`${getSlotKey(slot)}|break`);
-  const isSlotBlocked = (slot: string) => blockedSlots.includes(getSlotKey(slot)) || isSlotBreak(slot);
-  const openSlotCount = doctorSlots.filter(
-    (slot) => !bookedSlotTimes.includes(slot) && !isSlotBlocked(slot)
-  ).length;
-  const getSlotAppointment = (slot: string) => appointments.find(
-    (appointment) => appointment.doctorId === slotDoctor?.id && appointment.date === slotDate && appointment.timeSlot === slot && ['Scheduled', 'Checked-In', 'In Consultation'].includes(appointment.status)
+  const getDoctorBranch = (doctor: typeof doctors[number]) => doctor.branch || 'Central Branch';
+  const branchOptions = Array.from(new Set(doctors.map(getDoctorBranch))).sort();
+  const doctorsForBranches = doctors.filter((doctor) =>
+    selectedBranches === null || selectedBranches.includes(getDoctorBranch(doctor))
   );
+  const doctorDepartmentOptions = Array.from(new Set(doctorsForBranches.map((doctor) => doctor.department))).sort();
+  const doctorsForDepartments = doctorsForBranches.filter((doctor) =>
+    selectedSlotDepartments === null || selectedSlotDepartments.includes(doctor.department)
+  );
+  const doctorOptions = doctorsForDepartments.map((doctor) => doctor.id).sort();
+  const doctorsForSlots = doctorsForDepartments
+    .filter((doctor) => selectedDoctorIds === null || selectedDoctorIds.includes(doctor.id))
+    .sort((a, b) =>
+      getDoctorBranch(a).localeCompare(getDoctorBranch(b)) ||
+      a.department.localeCompare(b.department) ||
+      a.name.localeCompare(b.name)
+    );
+  const getSlotKey = (doctorId: string, slot: string) => `${doctorId}|${slotDate}|${slot}`;
+  const isSlotBlocked = (doctorId: string, slot: string) => {
+    const slotKey = getSlotKey(doctorId, slot);
+    return blockedSlots.includes(slotKey) || blockedSlots.includes(`${slotKey}|break`);
+  };
+  const getSlotAppointment = (doctorId: string, slot: string) => appointments.find(
+    (appointment) => appointment.doctorId === doctorId && appointment.date === slotDate && appointment.timeSlot === slot && ['Scheduled', 'Checked-In', 'In Consultation'].includes(appointment.status)
+  );
+  const doctorSchedules = doctorsForSlots.map((doctor) => ({
+    doctor,
+    slots: getDutyAppointmentSlots(getDoctorDutyWindow(doctor, doctorDutySchedules, slotDate)),
+  }));
+  const allTimeSlots = Array.from(new Set(doctorSchedules.flatMap((schedule) => schedule.slots))).sort((a, b) => {
+    const toMinutes = (slot: string) => {
+      const match = slot.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!match) return Number.MAX_SAFE_INTEGER;
+      const hour = Number(match[1]) % 12 + (match[3].toUpperCase() === 'PM' ? 12 : 0);
+      return hour * 60 + Number(match[2]);
+    };
+    return toMinutes(a) - toMinutes(b);
+  });
+  const openSlotCount = doctorSchedules.reduce(
+    (count, { doctor, slots }) => count + slots.filter((slot) => !getSlotAppointment(doctor.id, slot) && !isSlotBlocked(doctor.id, slot)).length,
+    0
+  );
+  const contextMenuDoctor = doctors.find((doctor) => doctor.id === contextMenu?.doctorId);
   const slotDates = Array.from({ length: 7 }, (_, index) => {
     const day = new Date();
     day.setDate(day.getDate() + index);
@@ -182,26 +257,20 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
     setCancellationTarget(null);
   };
 
-  const openSlotContextMenu = (event: React.MouseEvent, slot: string) => {
+  const openSlotContextMenu = (event: React.MouseEvent, doctorId: string, slot: string) => {
     event.preventDefault();
     const menuWidth = 220;
     const menuHeight = 280;
     setContextMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+      doctorId,
       slot,
     });
   };
 
-  const toggleSlotBlocked = (slot: string) => {
-    const key = getSlotKey(slot);
-    const wasBlocked = blockedSlots.includes(key);
-    setBlockedSlots((previous) => wasBlocked ? previous.filter((item) => item !== key) : [...previous, key]);
-    logAuditEvent('UPDATE', 'Appointment', key, `${wasBlocked ? 'Unblocked' : 'Blocked'} ${slotDoctor?.name || 'doctor'} slot ${slot} on ${slotDate}.`);
-    setContextMenu(null);
-  };
-
-  const pasteCopiedAppointment = (slot: string) => {
+  const pasteCopiedAppointment = (doctorId: string, slot: string) => {
+    const slotDoctor = doctors.find((doctor) => doctor.id === doctorId);
     if (!copiedAppointment || !slotDoctor) return;
     addAppointment({
       patientId: copiedAppointment.patientId,
@@ -210,6 +279,7 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
       patientGender: copiedAppointment.patientGender,
       doctorId: slotDoctor.id,
       doctorName: slotDoctor.name,
+      branch: getDoctorBranch(slotDoctor),
       department: slotDoctor.department,
       roomNumber: slotDoctor.roomNumber,
       date: slotDate,
@@ -237,13 +307,11 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
               <div className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-blue-700 mb-1">
                 Hospital Management System (2)
               </div>
-              <h2 className="text-base font-bold text-slate-900 tracking-tight">
-                Clinical Appointment & Consultation Scheduling
-              </h2>
+              <h2 className="text-base font-bold text-slate-900 tracking-tight">Appointment Schedule</h2>
             </div>
           </div>
           <p className="text-xs text-slate-500 max-w-2xl">
-            Real-time outpatient check-in queue, clinician bookings, and waiting room turnover tracking.
+            Filter by department and doctor to review daily appointment slots and bookings.
           </p>
         </div>
 
@@ -474,28 +542,32 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
             <div className="flex items-center gap-2">
               <CalendarDays className="h-4 w-4 text-teal-800" />
               <div>
-                <h3 className="text-sm font-bold text-slate-900">Book by department and doctor</h3>
-                <p className="text-[11px] text-slate-500">Choose a department, doctor, and day to view appointment slots.</p>
+                <h3 className="text-sm font-bold text-slate-900">Compare appointment schedules</h3>
+                <p className="text-[11px] text-slate-500">Filter multiple branches, departments, and doctors for the same day.</p>
               </div>
             </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:w-[32rem]">
-              <label className="text-[10px] font-semibold text-slate-600">
-                Department
-                <select aria-label="Filter doctors by department" value={slotDepartment} onChange={(event) => {
-                  const department = event.target.value;
-                  setSlotDepartment(department);
-                  const firstDoctor = doctors.find((doctor) => doctor.department === department);
-                  if (firstDoctor) setSlotDoctorId(firstDoctor.id);
-                }} className="mt-1 block min-w-0 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800">
-                  {doctorDepartmentOptions.map((department) => <option key={department} value={department}>{department}</option>)}
-                </select>
-              </label>
-              <label className="text-[10px] font-semibold text-slate-600">
-                Doctor
-                <select aria-label="Choose doctor" value={slotDoctor?.id || ''} onChange={(event) => setSlotDoctorId(event.target.value)} disabled={doctorsForSlots.length === 0} className="mt-1 block min-w-0 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 disabled:bg-slate-100">
-                  {doctorsForSlots.map((doctor) => <option key={doctor.id} value={doctor.id}>{doctor.name} · {doctor.specialty}</option>)}
-                </select>
-              </label>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <MultiSelectFilter label="Branches" options={branchOptions} value={selectedBranches} onChange={setSelectedBranches} />
+              <MultiSelectFilter label="Departments" options={doctorDepartmentOptions} value={selectedSlotDepartments} onChange={setSelectedSlotDepartments} />
+              <MultiSelectFilter
+                label="Doctors"
+                options={doctorOptions}
+                value={selectedDoctorIds}
+                onChange={setSelectedDoctorIds}
+                optionLabels={Object.fromEntries(doctorsForDepartments.map((doctor) => [doctor.id, `${getDoctorDisplayName(doctor)} · ${getDoctorBranch(doctor)}`]))}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedBranches(null);
+                  setSelectedSlotDepartments(null);
+                  setSelectedDoctorIds(null);
+                }}
+                disabled={selectedBranches === null && selectedSlotDepartments === null && selectedDoctorIds === null}
+                className="min-h-9 rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Clear filters
+              </button>
             </div>
           </div>
 
@@ -514,63 +586,105 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
               </label>
             </div>
 
-            {slotDoctor ? (
-              <>
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
-                  <div>
-                    <p className="text-xs font-bold text-slate-900">{slotDoctor.name}</p>
-                    <p className="mt-0.5 text-[10px] text-slate-500">{slotDoctor.specialty} · {slotDoctor.department}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] font-bold uppercase text-slate-500">Available hours</p>
-                    <p className={`mt-0.5 text-xs font-semibold ${slotDutyWindow.isOnDuty ? 'text-emerald-800' : 'text-rose-700'}`}>
-                      {slotDutyWindow.isOnDuty ? `${slotDutyWindow.startTime}–${slotDutyWindow.endTime}` : 'Off duty'}
-                    </p>
-                  </div>
+            <div className="mt-4">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-slate-800">Appointment time slots</h4>
+                <span className="text-[10px] text-slate-500">{openSlotCount} available for booking</span>
+              </div>
+              {doctorsForSlots.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-slate-300 p-6 text-center text-xs text-slate-500">No doctors match these filters. Select more branches, departments, or doctors.</p>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-slate-200">
+                  <table className="w-full min-w-[56rem] border-collapse text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-left text-[10px] uppercase tracking-wider text-slate-500">
+                        <th scope="col" className="sticky left-0 z-10 min-w-24 border-r border-slate-200 bg-slate-50 px-3 py-2.5 font-bold">Time slot</th>
+                        {doctorSchedules.map(({ doctor }) => (
+                          <th key={doctor.id} scope="col" className="min-w-44 border-r border-slate-200 px-3 py-2.5 align-top last:border-r-0">
+                            <div className="flex items-start gap-2">
+                              <DoctorAvatar name={getDoctorDisplayName(doctor)} imageUrl={doctor.avatar} size="sm" />
+                              <div className="min-w-0">
+                                <span className="mb-1 inline-flex rounded-full bg-teal-50 px-2 py-0.5 text-[9px] font-bold normal-case tracking-normal text-teal-800">
+                                  {getDoctorBranch(doctor)}
+                                </span>
+                                <span className="block text-[11px] font-bold normal-case tracking-normal text-slate-800">{getDoctorDisplayName(doctor)}</span>
+                                <span className="mt-0.5 block text-[9px] font-medium normal-case tracking-normal text-slate-500">{doctor.department}</span>
+                                <span className="mt-0.5 block text-[9px] font-medium normal-case tracking-normal text-slate-500">Degree: {getDoctorDegree(doctor) || 'Not recorded'}</span>
+                                <span className="block text-[9px] font-medium normal-case tracking-normal text-slate-500">
+                                  Nationality: {doctor.nationality || 'Not recorded'} · Language: {doctor.language || 'Not recorded'}
+                                </span>
+                              </div>
+                            </div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {allTimeSlots.length === 0 ? (
+                        <tr>
+                          <td colSpan={doctorSchedules.length + 1} className="px-3 py-8 text-center text-xs text-slate-500">
+                            No doctor duty is scheduled for the selected date.
+                          </td>
+                        </tr>
+                      ) : allTimeSlots.map((slot) => (
+                        <tr key={slot} className="hover:bg-slate-50/70">
+                          <th scope="row" className="sticky left-0 z-10 border-r border-slate-200 bg-white px-3 py-2.5 font-semibold text-slate-800">
+                            {slot}
+                          </th>
+                          {doctorSchedules.map(({ doctor, slots }) => {
+                            const isOnDuty = slots.includes(slot);
+                            const appointment = isOnDuty ? getSlotAppointment(doctor.id, slot) : undefined;
+                            const isBreak = isOnDuty && blockedSlots.includes(`${getSlotKey(doctor.id, slot)}|break`);
+                            const isBlocked = isOnDuty && isSlotBlocked(doctor.id, slot);
+                            const cellStatus = !isOnDuty ? 'Not scheduled' : appointment ? 'Booked' : isBreak ? 'Break' : isBlocked ? 'Off duty' : 'Available';
+                            return (
+                              <td key={doctor.id} className="border-r border-slate-100 px-3 py-2 text-center last:border-r-0">
+                                {isOnDuty ? (
+                                  <div className="relative inline-block" onContextMenu={(event) => openSlotContextMenu(event, doctor.id, slot)}>
+                                    <button
+                                      type="button"
+                                      disabled={Boolean(appointment) || isBlocked}
+                                      aria-label={`${cellStatus}: ${slot} with ${doctor.name} at ${getDoctorBranch(doctor)}`}
+                                      onClick={() => onOpenNewAppointment({ doctorId: doctor.id, date: slotDate, timeSlot: slot })}
+                                      className={`min-w-20 rounded-md border px-2.5 py-1.5 text-[10px] font-semibold transition disabled:cursor-not-allowed ${
+                                        appointment
+                                          ? 'border-blue-200 bg-blue-50 text-blue-700'
+                                          : isBlocked
+                                            ? 'border-slate-200 bg-slate-100 text-slate-500'
+                                            : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:border-emerald-400 hover:bg-emerald-100'
+                                      }`}
+                                    >
+                                      {cellStatus}
+                                    </button>
+                                  </div>
+                                ) : <span className="text-[10px] text-slate-400">—</span>}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                {doctorSlots.length === 0 ? (
-                  <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4 text-center text-xs text-amber-900">No duty is scheduled for this doctor on {slotDate}.</p>
-                ) : (
-                  <div className="mt-4">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <h4 className="text-xs font-bold text-slate-800">Appointment time slots</h4>
-                      <span className="text-[10px] text-slate-500">{openSlotCount} available for booking</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-                      {doctorSlots.map((slot) => {
-                        const booked = bookedSlotTimes.includes(slot);
-                        const blocked = isSlotBlocked(slot);
-                        return (
-                          <div key={slot} className="relative" onContextMenu={(event) => openSlotContextMenu(event, slot)}>
-                            <button type="button" aria-disabled={booked || blocked} onClick={() => { if (!booked && !blocked) onOpenNewAppointment({ doctorId: slotDoctor.id, date: slotDate, timeSlot: slot }); }} className={`min-h-10 w-full rounded-md border px-2 py-2 text-xs font-semibold transition ${booked || blocked ? 'cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400' : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:border-emerald-400 hover:bg-emerald-100'}`}>
-                              {booked ? `${slot} · Booked` : isSlotBreak(slot) ? `${slot} · Break` : blocked ? `${slot} · Off duty` : slot}
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="mt-4 rounded-lg border border-dashed border-slate-300 p-6 text-center text-xs text-slate-500">No doctors are available for this department.</p>
-            )}
+              )}
+            </div>
           </div>
         </section>
       )}
 
-      {contextMenu && slotDoctor && (() => {
-        const appointment = getSlotAppointment(contextMenu.slot);
-        const blocked = isSlotBlocked(contextMenu.slot);
+      {contextMenu && contextMenuDoctor && (() => {
+        const appointment = getSlotAppointment(contextMenu.doctorId, contextMenu.slot);
+        const blocked = isSlotBlocked(contextMenu.doctorId, contextMenu.slot);
+        const contextDoctorName = getDoctorDisplayName(contextMenuDoctor);
         const slotIsBookable = !appointment && !blocked;
         const menuActionClass = 'flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40';
         return (
           <div ref={contextMenuRef} role="menu" aria-label={`${contextMenu.slot} appointment slot actions`} style={{ left: contextMenu.x, top: contextMenu.y }} onContextMenu={(event) => event.preventDefault()} className="fixed z-50 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-xl">
             <div className="border-b border-slate-100 px-3 py-2">
               <p className="text-xs font-bold text-slate-900">{contextMenu.slot}</p>
-              <p className="truncate text-[10px] text-slate-500">{slotDoctor.name} · {slotDate}</p>
+              <p className="truncate text-[10px] text-slate-500">{contextDoctorName} · {getDoctorBranch(contextMenuDoctor)} · {slotDate}</p>
             </div>
-            <button role="menuitem" type="button" disabled={!slotIsBookable} onClick={() => { onOpenNewAppointment({ doctorId: slotDoctor.id, date: slotDate, timeSlot: contextMenu.slot }); setContextMenu(null); }} className={menuActionClass}>
+            <button role="menuitem" type="button" disabled={!slotIsBookable} onClick={() => { onOpenNewAppointment({ doctorId: contextMenu.doctorId, date: slotDate, timeSlot: contextMenu.slot }); setContextMenu(null); }} className={menuActionClass}>
               <Plus className="h-3.5 w-3.5 text-teal-700" /> Book
             </button>
             <button role="menuitem" type="button" disabled={!appointment} onClick={() => appointment && requestCancellation(appointment)} className={`${menuActionClass} text-rose-700`}>
@@ -579,16 +693,16 @@ export const AppointmentsManager: React.FC<AppointmentsManagerProps> = ({
             <button role="menuitem" type="button" disabled={!appointment} onClick={() => { if (appointment) setCopiedAppointment(appointment); setContextMenu(null); }} className={menuActionClass}>
               <Copy className="h-3.5 w-3.5 text-blue-700" /> Copy
             </button>
-            <button role="menuitem" type="button" disabled={!copiedAppointment || !slotIsBookable} onClick={() => pasteCopiedAppointment(contextMenu.slot)} className={menuActionClass}>
+            <button role="menuitem" type="button" disabled={!copiedAppointment || !slotIsBookable} onClick={() => pasteCopiedAppointment(contextMenu.doctorId, contextMenu.slot)} className={menuActionClass}>
               <ClipboardPaste className="h-3.5 w-3.5 text-blue-700" /> Paste
             </button>
             <button role="menuitem" type="button" disabled={Boolean(appointment)} onClick={() => {
-              const key = getSlotKey(contextMenu.slot);
-              const wasBlocked = isSlotBlocked(contextMenu.slot);
+              const key = getSlotKey(contextMenu.doctorId, contextMenu.slot);
+              const wasBlocked = isSlotBlocked(contextMenu.doctorId, contextMenu.slot);
               setBlockedSlots((previous) => wasBlocked
                 ? previous.filter((item) => item !== key && item !== `${key}|break`)
                 : [...previous, key]);
-              logAuditEvent('UPDATE', 'Appointment', key, `${wasBlocked ? 'Opened' : 'Marked off duty'} ${slotDoctor.name} slot ${contextMenu.slot} on ${slotDate}.`);
+              logAuditEvent('UPDATE', 'Appointment', key, `${wasBlocked ? 'Opened' : 'Marked off duty'} ${contextDoctorName} slot ${contextMenu.slot} on ${slotDate}.`);
               setContextMenu(null);
             }} className={menuActionClass}>
               <Ban className="h-3.5 w-3.5 text-amber-700" /> {blocked ? 'Open slot' : 'Mark off duty'}

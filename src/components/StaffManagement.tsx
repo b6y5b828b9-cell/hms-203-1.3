@@ -17,7 +17,13 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { useHospital } from '../context/HospitalContext';
-import { StaffMember, UserRole } from '../types';
+import { DoctorPackageService, StaffMember, UserRole } from '../types';
+import { getDoctorDegree, getDoctorDisplayName } from '../utils/doctorProfile';
+
+const getLocalDateString = () => {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
 
 export const StaffManagement: React.FC = () => {
   const {
@@ -27,6 +33,11 @@ export const StaffManagement: React.FC = () => {
     currentUser,
     addStaff,
     deactivateStaff,
+    updateDoctorProfile,
+    doctorPackages,
+    hospitalPriceCatalog,
+    saveDoctorPackage,
+    deactivateDoctorPackage,
     doctorDutyChangeRequests,
     reviewDoctorDutyChangeRequest,
   } = useHospital();
@@ -44,6 +55,26 @@ export const StaffManagement: React.FC = () => {
   const [newRole, setNewRole] = useState<UserRole>(currentRole === 'doctor' ? 'nurse' : 'doctor');
   const [formError, setFormError] = useState('');
   const [staffToDeactivate, setStaffToDeactivate] = useState<StaffMember | null>(null);
+  const [editingDoctorId, setEditingDoctorId] = useState(doctors[0]?.id || '');
+  const [doctorName, setDoctorName] = useState(getDoctorDisplayName(doctors[0] || { name: '' }));
+  const [doctorDepartment, setDoctorDepartment] = useState(doctors[0]?.department || '');
+  const [doctorNationality, setDoctorNationality] = useState(doctors[0]?.nationality || '');
+  const [doctorLanguage, setDoctorLanguage] = useState(doctors[0]?.language || '');
+  const [doctorDegree, setDoctorDegree] = useState(getDoctorDegree(doctors[0] || { name: '' }));
+  const [doctorFormError, setDoctorFormError] = useState('');
+  const [editingPackageId, setEditingPackageId] = useState('');
+  const [packageDoctorId, setPackageDoctorId] = useState(doctors[0]?.id || '');
+  const [packageName, setPackageName] = useState('');
+  const [packageNumber, setPackageNumber] = useState('');
+  const [packageCoverage, setPackageCoverage] = useState('100');
+  const [packageBasePrice, setPackageBasePrice] = useState('0');
+  const [packageServices, setPackageServices] = useState<DoctorPackageService[]>([]);
+  const [selectedPackageTariffId, setSelectedPackageTariffId] = useState('');
+  const [selectedServiceQuota, setSelectedServiceQuota] = useState('1');
+  const [packageValidFrom, setPackageValidFrom] = useState(getLocalDateString);
+  const [packageValidUntil, setPackageValidUntil] = useState(getLocalDateString);
+  const [packageIsActive, setPackageIsActive] = useState(true);
+  const [packageFormError, setPackageFormError] = useState('');
 
   const doctorManagedRoles: UserRole[] = ['doctor', 'nurse', 'physiotherapist', 'lab', 'radiology'];
   const canManageStaff = currentRole === 'admin' || currentRole === 'doctor';
@@ -98,6 +129,121 @@ export const StaffManagement: React.FC = () => {
     setNewLicense('');
     setIsAddFormOpen(false);
   };
+
+  const handleDoctorSelection = (doctorId: string) => {
+    const doctor = doctors.find((item) => item.id === doctorId);
+    if (!doctor) return;
+    setEditingDoctorId(doctorId);
+    setDoctorName(getDoctorDisplayName(doctor));
+    setDoctorDepartment(doctor.department);
+    setDoctorNationality(doctor.nationality || '');
+    setDoctorLanguage(doctor.language || '');
+    setDoctorDegree(getDoctorDegree(doctor));
+    setDoctorFormError('');
+  };
+
+  const handleSaveDoctorProfile = (event: React.FormEvent) => {
+    event.preventDefault();
+    const saved = updateDoctorProfile(editingDoctorId, {
+      name: doctorName,
+      department: doctorDepartment,
+      nationality: doctorNationality,
+      language: doctorLanguage,
+      degree: doctorDegree,
+    });
+    setDoctorFormError(saved ? '' : 'Doctor details were not saved. Check the required fields and try again.');
+  };
+
+  const handleSaveDoctorPackage = (event: React.FormEvent) => {
+    event.preventDefault();
+    setPackageFormError('');
+    const saved = saveDoctorPackage({
+      id: editingPackageId || `PKG-${Date.now()}`,
+      doctorId: packageDoctorId,
+      packageName,
+      packageNumber,
+      coveragePercent: Number(packageCoverage),
+      basePrice: Number(packageBasePrice),
+      includedServices: packageServices,
+      validFrom: packageValidFrom,
+      validUntil: packageValidUntil,
+      isActive: packageIsActive,
+    });
+    if (!saved) {
+      setPackageFormError('Package was not saved. Check the fields and your administrator permissions.');
+      return;
+    }
+    setEditingPackageId('');
+    setPackageName('');
+    setPackageNumber('');
+    setPackageCoverage('100');
+    setPackageBasePrice('0');
+    setPackageServices([]);
+    setSelectedPackageTariffId('');
+    setSelectedServiceQuota('1');
+    setPackageValidFrom(getLocalDateString());
+    setPackageValidUntil(getLocalDateString());
+    setPackageIsActive(true);
+  };
+
+  const handleEditDoctorPackage = (packageId: string) => {
+    const item = doctorPackages.find((entry) => entry.id === packageId);
+    if (!item) return;
+    setEditingPackageId(item.id);
+    setPackageDoctorId(item.doctorId);
+    setPackageName(item.packageName);
+    setPackageNumber(item.packageNumber);
+    setPackageCoverage(String(item.coveragePercent));
+    setPackageBasePrice(String(item.basePrice || 0));
+    setPackageServices((item.includedServices || []).map((service) => ({ ...service })));
+    setSelectedPackageTariffId('');
+    setSelectedServiceQuota('1');
+    setPackageValidFrom(item.validFrom);
+    setPackageValidUntil(item.validUntil);
+    setPackageIsActive(item.isActive);
+    setPackageFormError('');
+  };
+
+  const handleCancelPackageEdit = () => {
+    setEditingPackageId('');
+    setPackageDoctorId(doctors[0]?.id || '');
+    setPackageName('');
+    setPackageNumber('');
+    setPackageCoverage('100');
+    setPackageBasePrice('0');
+    setPackageServices([]);
+    setSelectedPackageTariffId('');
+    setSelectedServiceQuota('1');
+    setPackageValidFrom(getLocalDateString());
+    setPackageValidUntil(getLocalDateString());
+    setPackageIsActive(true);
+    setPackageFormError('');
+  };
+
+  const addPackageTariffService = () => {
+    const tariff = hospitalPriceCatalog.find((item) => item.id === selectedPackageTariffId);
+    const quota = Number(selectedServiceQuota);
+    if (!tariff || !Number.isInteger(quota) || quota < 1 || packageServices.some((item) => item.tariffItemId === tariff.id)) {
+      setPackageFormError('Choose a tariff service not already included and enter a positive whole-number quota.');
+      return;
+    }
+    setPackageServices((current) => [...current, {
+      tariffItemId: tariff.id,
+      code: tariff.code,
+      name: tariff.name,
+      category: tariff.category,
+      department: tariff.department,
+      cptCode: tariff.cptCode,
+      unitPrice: tariff.standardPrice,
+      insuranceCoveredPercent: tariff.insuranceCoveredApprox,
+      quota,
+    }]);
+    setSelectedPackageTariffId('');
+    setSelectedServiceQuota('1');
+    setPackageFormError('');
+  };
+
+  const packageRetailValue = packageServices.reduce((total, service) => total + service.unitPrice * service.quota, 0);
 
   if (!canManageStaff) {
     return (
@@ -218,6 +364,178 @@ export const StaffManagement: React.FC = () => {
             <div className="flex justify-end sm:col-span-2 lg:col-span-4">
               <button type="submit" className="inline-flex h-9 items-center gap-2 rounded-md bg-teal-800 px-4 text-xs font-bold text-white hover:bg-teal-900">
                 <UserPlus className="h-4 w-4" /> Create staff record
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
+
+      {currentRole === 'admin' && (
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center gap-2 border-b border-slate-100 pb-3">
+            <Award className="h-4 w-4 text-teal-700" />
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Doctor packages</h3>
+              <p className="mt-0.5 text-xs text-slate-500">Configure multiple packages per doctor and their coverage dates for existing-patient registration.</p>
+            </div>
+          </div>
+          <form onSubmit={handleSaveDoctorPackage} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="text-xs font-semibold text-slate-700">
+              Doctor
+              <select required value={packageDoctorId} onChange={(event) => setPackageDoctorId(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-normal">
+                <option value="">Select doctor</option>
+                {doctors.map((doctor) => <option key={doctor.id} value={doctor.id}>{getDoctorDisplayName(doctor)} · {doctor.department}</option>)}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Package name
+              <input required value={packageName} onChange={(event) => setPackageName(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Package number
+              <input required value={packageNumber} onChange={(event) => setPackageNumber(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Coverage (%)
+              <input required type="number" min="0" max="100" step="1" value={packageCoverage} onChange={(event) => setPackageCoverage(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Base package price (AED)
+              <input required type="number" min="0" step="0.01" value={packageBasePrice} onChange={(event) => setPackageBasePrice(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Valid from
+              <input required type="date" value={packageValidFrom} onChange={(event) => setPackageValidFrom(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Valid until
+              <input required type="date" min={packageValidFrom} value={packageValidUntil} onChange={(event) => setPackageValidUntil(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:col-span-2 lg:col-span-4">
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="min-w-[220px] flex-1 text-xs font-semibold text-slate-700">
+                  Included tariff service
+                  <select value={selectedPackageTariffId} onChange={(event) => setSelectedPackageTariffId(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-normal">
+                    <option value="">Select from locked price list</option>
+                    {hospitalPriceCatalog.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name} · AED {item.standardPrice.toFixed(2)}</option>)}
+                  </select>
+                </label>
+                <label className="w-28 text-xs font-semibold text-slate-700">
+                  Included quota
+                  <input type="number" min="1" step="1" value={selectedServiceQuota} onChange={(event) => setSelectedServiceQuota(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+                </label>
+                <button type="button" onClick={addPackageTariffService} disabled={!selectedPackageTariffId} className="inline-flex h-9 items-center gap-1 rounded-md border border-teal-700 px-3 text-xs font-bold text-teal-800 hover:bg-teal-50 disabled:opacity-50">
+                  <Plus className="h-3.5 w-3.5" /> Add service
+                </button>
+              </div>
+              {packageServices.length ? (
+                <div className="mt-3 space-y-2">
+                  {packageServices.map((service) => (
+                    <div key={service.tariffItemId} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs">
+                      <div className="min-w-0">
+                        <strong className="text-slate-800">{service.name}</strong>
+                        <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">{service.cptCode || service.code}</span>
+                        <span className="ml-2 text-slate-500">Locked AED {service.unitPrice.toFixed(2)} · quota {service.quota}</span>
+                      </div>
+                      <button type="button" onClick={() => setPackageServices((current) => current.filter((entry) => entry.tariffItemId !== service.tariffItemId))} aria-label={`Remove ${service.name}`} className="rounded p-1 text-rose-700 hover:bg-rose-50"><X className="h-3.5 w-3.5" /></button>
+                    </div>
+                  ))}
+                  <p className="text-right text-[11px] text-slate-600">
+                    Tariff value AED {packageRetailValue.toFixed(2)} · Bundle savings <strong className={packageRetailValue > Number(packageBasePrice) ? 'text-emerald-700' : 'text-slate-700'}>AED {Math.max(0, packageRetailValue - (Number(packageBasePrice) || 0)).toFixed(2)}</strong>
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-2 text-[11px] text-slate-500">No services included yet. Add tariff services and their package quotas.</p>
+              )}
+            </div>
+            {editingPackageId && (
+              <label className="flex items-center gap-2 self-end pb-2 text-xs font-semibold text-slate-700">
+                <input type="checkbox" checked={packageIsActive} onChange={(event) => setPackageIsActive(event.target.checked)} />
+                Active
+              </label>
+            )}
+            {packageFormError && <p role="alert" className="text-xs text-rose-700 sm:col-span-2 lg:col-span-4">{packageFormError}</p>}
+            <div className="flex justify-end gap-2 sm:col-span-2 lg:col-span-4">
+              {editingPackageId && <button type="button" onClick={handleCancelPackageEdit} className="rounded-md border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700">Cancel edit</button>}
+              <button type="submit" disabled={!packageDoctorId} className="rounded-md bg-teal-800 px-4 py-2 text-xs font-bold text-white hover:bg-teal-900 disabled:cursor-not-allowed disabled:opacity-50">
+                {editingPackageId ? 'Save package changes' : 'Add package'}
+              </button>
+            </div>
+          </form>
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[700px] text-left text-xs">
+              <thead className="border-b border-slate-200 text-[10px] uppercase text-slate-500">
+                <tr><th className="px-2 py-2">Doctor / package</th><th className="px-2 py-2">Number</th><th className="px-2 py-2">Price / services</th><th className="px-2 py-2">Coverage</th><th className="px-2 py-2">Validity</th><th className="px-2 py-2">Status</th><th className="px-2 py-2">Actions</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {doctorPackages.map((item) => {
+                  const doctor = doctors.find((entry) => entry.id === item.doctorId);
+                  return (
+                    <tr key={item.id}>
+                      <td className="px-2 py-2"><strong className="block text-slate-800">{doctor?.name || 'Unknown doctor'}</strong><span className="text-slate-500">{item.packageName}</span></td>
+                      <td className="px-2 py-2 text-slate-700">{item.packageNumber}</td>
+                      <td className="px-2 py-2 text-slate-700">AED {(item.basePrice || 0).toFixed(2)} <span className="text-slate-500">· {item.includedServices?.length || 0} services</span></td>
+                      <td className="px-2 py-2 text-slate-700">{item.coveragePercent}%</td>
+                      <td className="px-2 py-2 text-slate-700">{item.validFrom} – {item.validUntil}</td>
+                      <td className="px-2 py-2"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${item.isActive ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'}`}>{item.isActive ? 'Active' : 'Inactive'}</span></td>
+                      <td className="px-2 py-2">
+                        <div className="flex gap-2">
+                          <button type="button" onClick={() => handleEditDoctorPackage(item.id)} className="font-semibold text-teal-800 hover:underline">Edit</button>
+                          {item.isActive && <button type="button" onClick={() => deactivateDoctorPackage(item.id)} className="font-semibold text-rose-700 hover:underline">Deactivate</button>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {doctorPackages.length === 0 && <tr><td colSpan={7} className="px-2 py-5 text-center text-slate-500">No doctor packages configured.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {currentRole === 'admin' && (
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center gap-2 border-b border-slate-100 pb-3">
+            <Award className="h-4 w-4 text-teal-700" />
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Doctor scheduling details</h3>
+              <p className="mt-0.5 text-xs text-slate-500">Edit the doctor name, department, nationality, language, and degree shown in scheduling.</p>
+            </div>
+          </div>
+          <form onSubmit={handleSaveDoctorProfile} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <label className="text-xs font-semibold text-slate-700">
+              Doctor
+              <select required value={editingDoctorId} onChange={(event) => handleDoctorSelection(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-normal">
+                {doctors.map((doctor) => (
+                  <option key={doctor.id} value={doctor.id}>{getDoctorDisplayName(doctor)} · {doctor.department}</option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Doctor name
+              <input required value={doctorName} onChange={(event) => setDoctorName(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Department
+              <input required value={doctorDepartment} onChange={(event) => setDoctorDepartment(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Nationality
+              <input value={doctorNationality} onChange={(event) => setDoctorNationality(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Language
+              <input value={doctorLanguage} onChange={(event) => setDoctorLanguage(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" />
+            </label>
+            <label className="text-xs font-semibold text-slate-700">
+              Degree
+              <input value={doctorDegree} onChange={(event) => setDoctorDegree(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-normal" placeholder="e.g. MBBS, MD" />
+            </label>
+            {doctorFormError && <p role="alert" className="text-xs text-rose-700 lg:col-span-3">{doctorFormError}</p>}
+            <div className="flex justify-end sm:col-span-2 lg:col-span-3">
+              <button type="submit" disabled={!editingDoctorId} className="inline-flex h-9 items-center gap-2 rounded-md bg-teal-800 px-4 text-xs font-bold text-white hover:bg-teal-900 disabled:cursor-not-allowed disabled:opacity-50">
+                <CheckCircle2 className="h-4 w-4" /> Save doctor details
               </button>
             </div>
           </form>

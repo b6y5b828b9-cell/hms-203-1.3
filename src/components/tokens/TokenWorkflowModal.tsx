@@ -951,7 +951,8 @@ export const TokenWorkflowModal: React.FC<TokenWorkflowModalProps> = ({
                     <div className="space-y-1.5 text-sm">
                       <div className="flex justify-between"><span className="text-slate-500">Package:</span><span className="font-medium text-slate-900">{scheme.packageName || 'Hospital Package'}</span></div>
                       <div className="flex justify-between"><span className="text-slate-500">Package Number:</span><span className="font-mono text-slate-900">{scheme.packageNumber || 'Not provided'}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-500">Coverage Level:</span><span className="font-semibold text-emerald-700">{scheme.coveragePercent || 80}% Package Covered</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Coverage Level:</span><span className="font-semibold text-emerald-700">{scheme.coveragePercent ?? 80}% Package Covered</span></div>
+                      {scheme.validUntil && <div className="flex justify-between"><span className="text-slate-500">Valid through:</span><span className="font-medium text-slate-900">{scheme.validUntil}</span></div>}
                     </div>
                   )}
 

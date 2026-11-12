@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { HospitalProvider, useHospital, NavigationTab } from './context/HospitalContext';
 import { getThemeClasses } from './utils/theme';
 import { Invoice } from './types';
@@ -43,6 +43,7 @@ import { StaffManagement } from './components/StaffManagement';
 import { ReportsAnalytics } from './components/ReportsAnalytics';
 import { AdminCompliance } from './components/AdminCompliance';
 import { PatientRegistrationDesk } from './components/PatientRegistrationDesk';
+import { PackageAssignmentView } from './components/PackageAssignmentView';
 import { PatientMedicalRecordView } from './components/PatientMedicalRecordView';
 import { MedicalCertificateView } from './components/MedicalCertificateView';
 import { SurgicalScheduleView } from './components/SurgicalScheduleView';
@@ -66,10 +67,12 @@ const HospitalAppContent: React.FC = () => {
   // Modal State
   const [isNewPatientOpen, setIsNewPatientOpen] = useState(false);
   const [newPatientInitialTelehealth, setNewPatientInitialTelehealth] = useState(false);
+  const [isRegisteringAppointmentPatient, setIsRegisteringAppointmentPatient] = useState(false);
+  const appointmentPatientRegistrationCompleted = useRef(false);
   const [editingPatientId, setEditingPatientId] = useState<string | undefined>(undefined);
   const [isNewAppointmentOpen, setIsNewAppointmentOpen] = useState(false);
   const [appointmentPreset, setAppointmentPreset] = useState<
-    { doctorId?: string; date?: string; timeSlot?: string } | undefined
+    { doctorId?: string; date?: string; timeSlot?: string; patientId?: string } | undefined
   >(undefined);
   const [isNewInvoiceOpen, setIsNewInvoiceOpen] = useState(false);
   const [payingInvoice, setPayingInvoice] = useState<Invoice | null>(null);
@@ -128,6 +131,8 @@ const HospitalAppContent: React.FC = () => {
             }}
           />
         );
+      case 'package-assigning':
+        return <PackageAssignmentView />;
       case 'overview':
         return (
           <DashboardOverview
@@ -333,10 +338,22 @@ const HospitalAppContent: React.FC = () => {
           setIsNewPatientOpen(false);
           setEditingPatientId(undefined);
           setNewPatientInitialTelehealth(false);
+          if (isRegisteringAppointmentPatient) {
+            setIsRegisteringAppointmentPatient(false);
+            if (!appointmentPatientRegistrationCompleted.current) setAppointmentPreset(undefined);
+            appointmentPatientRegistrationCompleted.current = false;
+          }
         }}
         onPatientCreated={(newId) => {
-          setSelectedPatientId(newId);
-          setActiveTab('patients');
+          if (isRegisteringAppointmentPatient) {
+            appointmentPatientRegistrationCompleted.current = true;
+            setAppointmentPreset((preset) => ({ ...preset, patientId: newId }));
+            setIsRegisteringAppointmentPatient(false);
+            setIsNewAppointmentOpen(true);
+          } else {
+            setSelectedPatientId(newId);
+            setActiveTab('patients');
+          }
         }}
       />
 
@@ -349,6 +366,13 @@ const HospitalAppContent: React.FC = () => {
         presetDoctorId={appointmentPreset?.doctorId}
         presetDate={appointmentPreset?.date}
         presetTimeSlot={appointmentPreset?.timeSlot}
+        presetPatientId={appointmentPreset?.patientId}
+        onRegisterNewPatient={() => {
+          setIsNewAppointmentOpen(false);
+          appointmentPatientRegistrationCompleted.current = false;
+          setIsRegisteringAppointmentPatient(true);
+          setIsNewPatientOpen(true);
+        }}
       />
 
       <NewInvoiceModal

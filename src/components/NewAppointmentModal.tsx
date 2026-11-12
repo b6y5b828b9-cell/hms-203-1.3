@@ -14,6 +14,8 @@ import {
 import { useHospital } from '../context/HospitalContext';
 import { AppointmentPriority } from '../types';
 import { getDoctorDutyWindow, getDutyAppointmentSlots } from '../utils/doctorDutySchedule';
+import { getDoctorDegree, getDoctorDisplayName } from '../utils/doctorProfile';
+import { DoctorAvatar } from './DoctorAvatar';
 import { PatientAvatar } from './PatientAvatar';
 
 interface NewAppointmentModalProps {
@@ -22,6 +24,8 @@ interface NewAppointmentModalProps {
   presetDoctorId?: string;
   presetDate?: string;
   presetTimeSlot?: string;
+  presetPatientId?: string;
+  onRegisterNewPatient?: () => void;
 }
 
 export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
@@ -30,6 +34,8 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
   presetDoctorId,
   presetDate,
   presetTimeSlot,
+  presetPatientId,
+  onRegisterNewPatient,
 }) => {
   const { patients, doctors, doctorDutySchedules, appointments, addAppointment, addNotification } = useHospital();
 
@@ -37,6 +43,7 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
   const [doctorId, setDoctorId] = useState(presetDoctorId || doctors[0]?.id || '');
   const [date, setDate] = useState(presetDate || new Date().toISOString().split('T')[0]);
   const [timeSlot, setTimeSlot] = useState(presetTimeSlot || '10:00 AM');
+  const [patientType, setPatientType] = useState<'existing' | 'new'>('existing');
   const [priority, setPriority] = useState<AppointmentPriority>('Normal');
   const [bookingChannel, setBookingChannel] = useState<'Clinic' | 'Call Center' | 'Application'>('Clinic');
   const [isTelehealth, setIsTelehealth] = useState(false);
@@ -56,9 +63,11 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
     setDoctorId(presetDoctorId || doctors[0]?.id || '');
     setDate(presetDate || new Date().toISOString().split('T')[0]);
     setTimeSlot(presetTimeSlot || '10:00 AM');
+    setPatientId(presetPatientId || patients[0]?.id || '');
+    setPatientType('existing');
     setBookingChannel('Clinic');
     setPatientQuery('');
-  }, [isOpen, presetDoctorId, presetDate, presetTimeSlot, doctors]);
+  }, [isOpen, presetDoctorId, presetDate, presetTimeSlot, presetPatientId, doctors, patients]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -70,8 +79,6 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
-
-  if (!isOpen) return null;
 
   const searchablePatients = patients.filter((patient) => {
     const search = patientQuery.trim().toLowerCase();
@@ -119,6 +126,8 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
     if (!availableDutySlots.includes(timeSlot)) setTimeSlot(availableDutySlots[0] || '');
   }, [isOpen, selectedDoc?.id, date, availableDutySlots.join('|')]);
 
+  if (!isOpen) return null;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -142,7 +151,7 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
       patientAge: selectedPatient.age,
       patientGender: selectedPatient.gender,
       doctorId: selectedDoc.id,
-      doctorName: selectedDoc.name,
+      doctorName: getDoctorDisplayName(selectedDoc),
       department: selectedDoc.department,
       date,
       timeSlot,
@@ -231,42 +240,64 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
             </span>
 
             <div>
-              <label className="text-[11px] font-semibold text-slate-700 block mb-1">
-                Select Patient
-              </label>
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={patientQuery}
-                  onChange={(e) => setPatientQuery(e.target.value)}
-                  placeholder="Search by name, phone, MRN, national ID, or passport"
-                  className="w-full bg-white border border-slate-300 rounded-lg pl-8 pr-2 py-2 text-xs font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                />
+              <div className="mb-2 grid grid-cols-2 gap-2" role="group" aria-label="Patient type">
+                <button type="button" aria-pressed={patientType === 'existing'} onClick={() => setPatientType('existing')} className={`rounded-md border px-3 py-2 text-[11px] font-semibold ${patientType === 'existing' ? 'border-blue-700 bg-blue-50 text-blue-800' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'}`}>
+                  Existing patient
+                </button>
+                <button type="button" aria-pressed={patientType === 'new'} onClick={() => setPatientType('new')} className={`rounded-md border px-3 py-2 text-[11px] font-semibold ${patientType === 'new' ? 'border-blue-700 bg-blue-50 text-blue-800' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'}`}>
+                  New patient
+                </button>
               </div>
-              <select
-                value={patientId}
-                onChange={(e) => setPatientId(e.target.value)}
-                className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none mt-2"
-                required
-              >
-                {searchablePatients.length === 0 ? (
-                  <option value="">No patient matches this search</option>
-                ) : (
-                  searchablePatients.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.firstName} {p.lastName} (MRN: {p.id}) — {p.phone || 'No phone'} · {p.emiratesId || p.passportNo || 'No ID'}
-                    </option>
-                  ))
-                )}
-              </select>
-              {selectedPatient && (
-                <div className="mt-2 flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 p-2">
-                  <PatientAvatar patientId={selectedPatient.id} name={`${selectedPatient.firstName} ${selectedPatient.lastName}`} gender={selectedPatient.gender} imageUrl={selectedPatient.photo || selectedPatient.avatar} size="sm" />
-                  <div className="min-w-0 text-[11px]">
-                    <p className="truncate font-semibold text-slate-800">{selectedPatient.firstName} {selectedPatient.lastName}</p>
-                    <p className="text-slate-500">{selectedPatient.age}y · {selectedPatient.gender} · {selectedPatient.rgNo || selectedPatient.id}</p>
+              {patientType === 'existing' ? (
+                <>
+                  <label className="text-[11px] font-semibold text-slate-700 block mb-1">
+                    Select Patient
+                  </label>
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={patientQuery}
+                      onChange={(e) => setPatientQuery(e.target.value)}
+                      placeholder="Search by name, phone, MRN, national ID, or passport"
+                      className="w-full bg-white border border-slate-300 rounded-lg pl-8 pr-2 py-2 text-xs font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                    />
                   </div>
+                  <select
+                    value={patientId}
+                    onChange={(e) => setPatientId(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-lg p-2 text-xs font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none mt-2"
+                    required
+                  >
+                    {searchablePatients.length === 0 ? (
+                      <option value="">No patient matches this search</option>
+                    ) : (
+                      searchablePatients.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.firstName} {p.lastName} (MRN: {p.id}) — {p.phone || 'No phone'} · {p.emiratesId || p.passportNo || 'No ID'}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  {selectedPatient && (
+                    <div className="mt-2 flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 p-2">
+                      <PatientAvatar patientId={selectedPatient.id} name={`${selectedPatient.firstName} ${selectedPatient.lastName}`} gender={selectedPatient.gender} imageUrl={selectedPatient.photo || selectedPatient.avatar} size="sm" />
+                      <div className="min-w-0 text-[11px]">
+                        <p className="truncate font-semibold text-slate-800">{selectedPatient.firstName} {selectedPatient.lastName}</p>
+                        <p className="text-slate-500">{selectedPatient.age}y · {selectedPatient.gender} · {selectedPatient.rgNo || selectedPatient.id}</p>
+                        <p className="mt-0.5 text-slate-500">
+                          Nationality: {selectedPatient.nationality || 'Not recorded'} · Language: {selectedPatient.language || 'Not recorded'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+                  <p className="text-[11px] text-slate-700">Register a new patient before booking this appointment.</p>
+                  <button type="button" onClick={onRegisterNewPatient} disabled={!onRegisterNewPatient} className="mt-2 rounded-md bg-blue-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50">
+                    Continue to patient registration
+                  </button>
                 </div>
               )}
             </div>
@@ -283,7 +314,7 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
               >
                 {doctors.map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.name} — {d.specialty} ({d.department}) · {d.isAvailable ? 'Available' : 'In Consult'}
+                    {getDoctorDisplayName(d)} · {getDoctorDegree(d) || 'Degree not recorded'} — {d.specialty} ({d.department}) · {d.branch || 'Central Branch'} · {d.isAvailable ? 'Available' : 'In Consult'}
                   </option>
                 ))}
               </select>
@@ -318,14 +349,35 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
             </span>
 
             <div className="rounded-lg border border-slate-200 bg-white p-2.5">
-              <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Branch</div>
+                  <div className="font-semibold text-slate-800">{selectedDoc?.branch || 'Central Branch'}</div>
+                </div>
                 <div>
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Department</div>
                   <div className="font-semibold text-slate-800">{selectedDoc?.department || 'General Medicine'}</div>
                 </div>
-                <div className="text-right">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Doctor</div>
-                  <div className="font-semibold text-slate-800">{selectedDoc?.name || 'Doctor'}</div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    {selectedDoc && <DoctorAvatar name={getDoctorDisplayName(selectedDoc)} imageUrl={selectedDoc.avatar} size="sm" />}
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Doctor</div>
+                      <div className="truncate font-semibold text-slate-800">{selectedDoc ? getDoctorDisplayName(selectedDoc) : 'Doctor'}</div>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Degree</div>
+                  <div className="font-semibold text-slate-800">{selectedDoc ? getDoctorDegree(selectedDoc) || 'Not recorded' : 'Not recorded'}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Nationality</div>
+                  <div className="font-semibold text-slate-800">{selectedDoc?.nationality || 'Not recorded'}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Language</div>
+                  <div className="font-semibold text-slate-800">{selectedDoc?.language || 'Not recorded'}</div>
                 </div>
               </div>
 
@@ -451,7 +503,8 @@ export const NewAppointmentModal: React.FC<NewAppointmentModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs shadow-xs flex items-center gap-1.5 cursor-pointer transition"
+              disabled={patientType === 'new'}
+              className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs shadow-xs flex items-center gap-1.5 cursor-pointer transition disabled:cursor-not-allowed disabled:opacity-50"
             >
               <CheckCircle2 className="w-4 h-4" />
               <span>Confirm & Book Slot</span>

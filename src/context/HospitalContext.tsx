@@ -45,6 +45,9 @@ import {
   DoctorDutySchedule,
   StaffDutySchedule,
   HospitalPriceItem,
+  DoctorPackage,
+  DoctorPackageService,
+  PatientPackageAssignment,
   MedicalCertificate,
   SurgicalCase,
   SurgicalStatus,
@@ -129,6 +132,7 @@ export type NavigationTab =
   | 'ot-schedule'
   | 'blood-bank'
   | 'certificates'
+  | 'package-assigning'
   | 'pricelist'
   | 'tariffs'
   | 'telehealth'
@@ -171,6 +175,11 @@ interface HospitalContextType {
   hospitalPriceCatalog: HospitalPriceItem[];
   saveHospitalPriceItem: (item: HospitalPriceItem) => void;
   deactivateHospitalPriceItem: (itemId: string) => void;
+  doctorPackages: DoctorPackage[];
+  saveDoctorPackage: (item: Omit<DoctorPackage, 'createdAt' | 'createdBy'>) => DoctorPackage | null;
+  deactivateDoctorPackage: (itemId: string) => boolean;
+  assignDoctorPackageToToken: (patientId: string, tokenId: string, packageId: string) => boolean;
+  submitPackagePreAuth: (tokenId: string) => boolean;
   auditLogs: AuditLog[];
   compliance: SystemCompliance;
   notifications: LiveNotification[];
@@ -292,6 +301,10 @@ interface HospitalContextType {
   addStaff: (member: Omit<StaffMember, 'id' | 'isActive'>) => StaffMember | null;
   deactivateStaff: (id: string) => boolean;
   updateStaff: (id: string, updates: Partial<StaffMember>) => void;
+  updateDoctorProfile: (
+    doctorId: string,
+    updates: Pick<Doctor, 'name' | 'department' | 'nationality' | 'language' | 'degree'>
+  ) => boolean;
   setDoctorDutySchedule: (data: Omit<DoctorDutySchedule, 'id' | 'updatedAt' | 'updatedBy'>) => boolean;
   setStaffDutySchedule: (data: Omit<StaffDutySchedule, 'id' | 'updatedAt' | 'updatedBy'>) => boolean;
   submitDoctorDutyChangeRequest: (
@@ -377,6 +390,7 @@ const STORAGE_KEYS = {
   STAFF: 'medcore_staff_v3',
   PHARMACY: 'medcore_pharmacy_v3',
   HOSPITAL_PRICE_CATALOG: 'medcore_hospital_price_catalog_v1',
+  DOCTOR_PACKAGES: 'medcore_doctor_packages_v1',
   AUDIT_LOGS: 'medcore_audit_logs_v3',
   COMPLIANCE: 'medcore_compliance_v3',
   NOTIFICATIONS: 'medcore_notifications_v3',
@@ -420,7 +434,11 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const [doctors, setDoctors] = useState<Doctor[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.DOCTORS);
-    return saved ? JSON.parse(saved) : initialDoctors;
+    const storedDoctors: Doctor[] = saved ? JSON.parse(saved) : initialDoctors;
+    return storedDoctors.map((doctor) => ({
+      ...doctor,
+      branch: doctor.branch || initialDoctors.find((initialDoctor) => initialDoctor.id === doctor.id)?.branch || 'Central Branch',
+    }));
   });
 
   const [doctorDutySchedules, setDoctorDutySchedules] = useState<DoctorDutySchedule[]>(() => {
@@ -583,6 +601,20 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   });
 
+  const [doctorPackages, setDoctorPackages] = useState<DoctorPackage[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.DOCTOR_PACKAGES);
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed.map((item) => ({
+        ...item,
+        basePrice: Number(item.basePrice) || 0,
+        includedServices: Array.isArray(item.includedServices) ? item.includedServices : [],
+      })) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [medicalCertificates, setMedicalCertificates] = useState<MedicalCertificate[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.MEDICAL_CERTIFICATES);
@@ -741,13 +773,14 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         'billing-pos',
         'insurance-approvals',
         'reports',
+        'package-assigning',
         'pricelist',
         'ot-schedule',
         'blood-bank',
         'lab-orders',
       ];
       if (!receptionistTabs.includes(tab)) {
-        addNotification('Reception Portal Policy', 'Reception users have access to Dashboard, Registration, Medical Records, Certificates, Appointments, Patient Enquiry, Billing operations, Reports, Price List, and Care Schedules.', 'warning');
+        addNotification('Reception Portal Policy', 'Reception users have access to Dashboard, Registration, Medical Records, Certificates, Appointments, Patient Enquiry, Package Assigning, Price List, Billing operations, Reports, and Care Schedules.', 'warning');
         activateAndOpenTab('overview');
         return;
       }
@@ -1003,6 +1036,9 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.HOSPITAL_PRICE_CATALOG, JSON.stringify(hospitalPriceCatalog));
   }, [hospitalPriceCatalog]);
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.DOCTOR_PACKAGES, JSON.stringify(doctorPackages));
+  }, [doctorPackages]);
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.MEDICAL_CERTIFICATES, JSON.stringify(medicalCertificates));
   }, [medicalCertificates]);
@@ -1902,6 +1938,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       patientGender: aptData.patientGender || (patient ? patient.gender : 'Unknown'),
       doctorId: aptData.doctorId,
       doctorName: aptData.doctorName || (doctor ? doctor.name : 'Attending Physician'),
+      branch: aptData.branch || doctor?.branch || 'Central Branch',
       department: aptData.department || (doctor ? doctor.department : 'General OPD'),
       roomNumber: aptData.roomNumber || (doctor ? doctor.roomNumber : 'Room 101'),
       date: aptData.date || new Date().toISOString().split('T')[0],
@@ -4384,6 +4421,37 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     logAuditEvent('UPDATE', 'Security Settings', id, `Updated staff duty profile`);
   };
 
+  const updateDoctorProfile = (
+    doctorId: string,
+    updates: Pick<Doctor, 'name' | 'department' | 'nationality' | 'language' | 'degree'>
+  ): boolean => {
+    if (currentRole !== 'admin') {
+      addNotification('Doctor Profile Not Updated', 'Only an administrator can edit doctor scheduling details.', 'warning');
+      return false;
+    }
+
+    const doctor = doctors.find((item) => item.id === doctorId);
+    const name = updates.name.trim();
+    const department = updates.department.trim();
+    if (!doctor || !name || !department) {
+      addNotification('Doctor Profile Not Updated', 'Select a doctor and enter both a name and department.', 'warning');
+      return false;
+    }
+
+    const normalizedUpdates = {
+      ...updates,
+      name,
+      department,
+      degree: updates.degree?.trim() || undefined,
+      nationality: updates.nationality?.trim() || undefined,
+      language: updates.language?.trim() || undefined,
+    };
+    setDoctors((previous) => previous.map((item) => item.id === doctorId ? { ...item, ...normalizedUpdates } : item));
+    logAuditEvent('UPDATE', 'Doctor Profile', doctorId, `Updated scheduling profile for ${name} (${department}).`);
+    addNotification('Doctor Profile Updated', `Scheduling details updated for ${name}.`, 'success', doctorId);
+    return true;
+  };
+
   const setDoctorDutySchedule = (
     data: Omit<DoctorDutySchedule, 'id' | 'updatedAt' | 'updatedBy'>
   ): boolean => {
@@ -4895,6 +4963,210 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     logAuditEvent('DELETE', 'Billing Invoice', itemId, `Removed tariff item ${item.code} — ${item.name}.`);
   };
 
+  const saveDoctorPackage = (item: Omit<DoctorPackage, 'createdAt' | 'createdBy'>): DoctorPackage | null => {
+    if (currentRole !== 'admin') {
+      addNotification('Permission Denied', 'Only administrators can manage doctor packages.', 'warning');
+      return null;
+    }
+    const doctor = doctors.find((entry) => entry.id === item.doctorId);
+    const packageName = item.packageName.trim();
+    const packageNumber = item.packageNumber.trim();
+    const coveragePercent = Number(item.coveragePercent);
+    const basePrice = Number(item.basePrice);
+    const previous = doctorPackages.find((entry) => entry.id === item.id);
+    const includedServices = item.includedServices.map((service): DoctorPackageService | null => {
+      const tariff = hospitalPriceCatalog.find((entry) => entry.id === service.tariffItemId);
+      const previousSnapshot = previous?.includedServices.find((entry) => entry.tariffItemId === service.tariffItemId);
+      const quota = Number(service.quota);
+      const source = tariff || previousSnapshot;
+      if (!source || !Number.isInteger(quota) || quota < 1) return null;
+      return {
+        tariffItemId: service.tariffItemId,
+        code: source.code,
+        name: source.name,
+        category: source.category,
+        department: source.department,
+        cptCode: source.cptCode,
+        unitPrice: tariff?.standardPrice ?? previousSnapshot?.unitPrice ?? 0,
+        insuranceCoveredPercent: tariff?.insuranceCoveredApprox ?? previousSnapshot?.insuranceCoveredPercent ?? 0,
+        quota,
+      };
+    });
+    const validDate = (value: string) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsed = new Date(`${value}T00:00:00Z`);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    };
+    if (!doctor || !packageName || !packageNumber || !Number.isFinite(coveragePercent) ||
+      coveragePercent < 0 || coveragePercent > 100 || !validDate(item.validFrom) ||
+      !validDate(item.validUntil) || item.validUntil < item.validFrom || !Number.isFinite(basePrice) ||
+      basePrice < 0 || item.includedServices.length === 0 || includedServices.length !== item.includedServices.length ||
+      includedServices.some((service) => service === null) ||
+      new Set(item.includedServices.map((service) => service.tariffItemId)).size !== item.includedServices.length) {
+      addNotification('Invalid Package', 'Enter a doctor, package name and number, valid coverage and dates, a non-negative package price, and unique tariff services with positive quotas.', 'warning');
+      return null;
+    }
+
+    const savedPackage: DoctorPackage = {
+      ...item,
+      packageName,
+      packageNumber,
+      coveragePercent,
+      basePrice,
+      includedServices: includedServices.filter((service): service is DoctorPackageService => service !== null),
+      isActive: Boolean(item.isActive),
+      createdAt: previous?.createdAt || new Date().toISOString(),
+      createdBy: previous?.createdBy || currentUser.name,
+    };
+    setDoctorPackages((current) => previous
+      ? current.map((entry) => entry.id === item.id ? savedPackage : entry)
+      : [...current, savedPackage]);
+    logAuditEvent(previous ? 'UPDATE' : 'CREATE', 'Doctor Package', item.id, `${previous ? 'Updated' : 'Created'} ${packageName} (${packageNumber}) for ${doctor.name}.`);
+    addNotification('Package Saved', `${packageName} is available for ${doctor.name} from ${item.validFrom} to ${item.validUntil}.`, 'success');
+    return savedPackage;
+  };
+
+  const deactivateDoctorPackage = (itemId: string): boolean => {
+    if (currentRole !== 'admin') {
+      addNotification('Permission Denied', 'Only administrators can manage doctor packages.', 'warning');
+      return false;
+    }
+    const item = doctorPackages.find((entry) => entry.id === itemId);
+    if (!item) {
+      addNotification('Package Not Found', 'The selected doctor package could not be found.', 'warning');
+      return false;
+    }
+    setDoctorPackages((current) => current.map((entry) => entry.id === itemId ? { ...entry, isActive: false } : entry));
+    logAuditEvent('UPDATE', 'Doctor Package', itemId, `Deactivated ${item.packageName} (${item.packageNumber}).`);
+    return true;
+  };
+
+  const assignDoctorPackageToToken = (patientId: string, tokenId: string, packageId: string): boolean => {
+    if (!['admin', 'receptionist'].includes(currentRole)) {
+      addNotification('Package Assignment Blocked', 'Only administrators and reception staff can assign packages to a visit.', 'warning', tokenId);
+      return false;
+    }
+    const patient = patients.find((item) => item.id === patientId);
+    const token = receptionTokens.find((item) => item.id === tokenId && item.patientId === patientId);
+    const packageItem = doctorPackages.find((item) => item.id === packageId);
+    const visitDate = token?.visitDate || token?.createdDate;
+    if (!patient || !token || !packageItem || !visitDate ||
+      token.status === 'Cancelled' || token.status === 'Completed' || token.billingSummary ||
+      !packageItem.isActive || packageItem.doctorId !== token.doctorId ||
+      packageItem.validFrom > visitDate || packageItem.validUntil < visitDate ||
+      !packageItem.includedServices.length) {
+      addNotification('Package Assignment Failed', 'The patient, visit, doctor, or package validity could not be verified.', 'warning', tokenId);
+      return false;
+    }
+
+    const currentAssignments = patient.packageAssignments || [];
+    const existingAssignment = currentAssignments.find((assignment) =>
+      assignment.doctorPackageId === packageItem.id &&
+      assignment.validFrom <= visitDate &&
+      assignment.validUntil >= visitDate
+    );
+    const assignment: PatientPackageAssignment = existingAssignment
+      ? {
+          ...existingAssignment,
+          basePrice: existingAssignment.basePrice ?? packageItem.basePrice,
+          includedServices: existingAssignment.includedServices || packageItem.includedServices.map((service) => ({ ...service })),
+        }
+      : {
+          id: `PPA-${Date.now()}`,
+          doctorPackageId: packageItem.id,
+          doctorId: packageItem.doctorId,
+          doctorName: token.doctorName || packageItem.doctorId,
+          packageName: packageItem.packageName,
+          packageNumber: packageItem.packageNumber,
+          coveragePercent: packageItem.coveragePercent,
+          assignedAt: new Date().toISOString(),
+          validFrom: packageItem.validFrom,
+          validUntil: packageItem.validUntil,
+          assignedBy: currentUser.name,
+          basePrice: packageItem.basePrice,
+          includedServices: packageItem.includedServices.map((service) => ({ ...service })),
+        };
+    updatePatient(patientId, {
+      hasPackage: true,
+      selectedPackage: assignment.packageName,
+      packageAssignments: existingAssignment
+        ? currentAssignments.map((item) => item.id === existingAssignment.id ? assignment : item)
+        : [...currentAssignments, assignment],
+    });
+
+    setReceptionTokens((current) => current.map((item) => item.id !== tokenId ? item : {
+      ...item,
+      payMode: 'Company',
+      insuranceProvider: patient.insurance.provider || item.insuranceProvider || packageItem.packageName,
+      paymentScheme: {
+        ...(item.paymentScheme || { schemeType: 'Package' as const }),
+        schemeType: 'Package',
+        insuranceProvider: patient.insurance.provider || item.paymentScheme?.insuranceProvider,
+        policyNumber: patient.insurance.policyNumber || item.paymentScheme?.policyNumber,
+        network: patient.insurance.network || item.paymentScheme?.network,
+        coveragePercent: assignment.coveragePercent,
+        copayPercent: 100 - assignment.coveragePercent,
+        deductibleAmount: patient.insurance.deductibleAmount,
+        packageName: assignment.packageName,
+        packageNumber: assignment.packageNumber,
+        packageId: packageItem.id,
+        doctorId: packageItem.doctorId,
+        packageBasePrice: assignment.basePrice ?? packageItem.basePrice,
+        validFrom: assignment.validFrom,
+        validUntil: assignment.validUntil,
+        preAuthStatus: item.paymentScheme?.preAuthStatus || 'Not Required',
+      },
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: item.currentStage || '1_REGISTRATION',
+          timestamp: new Date().toISOString(),
+          action: `Assigned ${packageItem.packageName} (${packageItem.packageNumber}) to visit ${item.tokenNumber}.`,
+          actor: currentUser.name,
+        },
+      ],
+    }));
+    logAuditEvent('UPDATE', 'Patient Record', patientId, `Assigned ${packageItem.packageName} to visit token ${token.tokenNumber}.`);
+    addNotification('Package Applied', `${assignment.packageName} was assigned to the patient profile and applied to ${token.tokenNumber}.`, 'success', patientId);
+    return true;
+  };
+
+  const submitPackagePreAuth = (tokenId: string): boolean => {
+    if (!['admin', 'receptionist'].includes(currentRole)) {
+      addNotification('Pre-Authorization Blocked', 'Only administrators and reception staff can request package pre-authorization.', 'warning', tokenId);
+      return false;
+    }
+    const token = receptionTokens.find((item) => item.id === tokenId);
+    if (!token?.paymentScheme || token.paymentScheme.schemeType !== 'Package') {
+      addNotification('Package Not Assigned', 'Assign a package to this visit before requesting pre-authorization.', 'warning', tokenId);
+      return false;
+    }
+    if (token.status === 'Completed' || token.billingSummary) {
+      addNotification('Pre-Authorization Locked', 'Pre-authorization cannot be requested after this visit is completed or billed.', 'warning', tokenId);
+      return false;
+    }
+    if (token.paymentScheme.preAuthStatus === 'Pending' || token.paymentScheme.preAuthStatus === 'Approved') {
+      addNotification('Pre-Authorization Already Recorded', `This visit is already marked ${token.paymentScheme.preAuthStatus.toLowerCase()}.`, 'info', tokenId);
+      return false;
+    }
+    setReceptionTokens((current) => current.map((item) => item.id !== tokenId ? item : {
+      ...item,
+      paymentScheme: { ...item.paymentScheme!, preAuthStatus: 'Pending' },
+      historyLogs: [
+        ...(item.historyLogs || []),
+        {
+          stage: item.currentStage || '1_REGISTRATION',
+          timestamp: new Date().toISOString(),
+          action: `Package pre-authorization request recorded for ${item.paymentScheme?.packageName || 'assigned package'}.`,
+          actor: currentUser.name,
+        },
+      ],
+    }));
+    logAuditEvent('UPDATE', 'Billing Invoice', tokenId, `Package pre-authorization requested for ${token.paymentScheme.packageName || token.tokenNumber}.`);
+    addNotification('Pre-Authorization Request Recorded', 'The visit was marked pending pre-authorization. Submit required documents through the approved payer workflow.', 'info', tokenId);
+    return true;
+  };
+
   const resetHospitalData = () => {
     setPatients(initialPatients);
     setDoctors(initialDoctors);
@@ -4912,6 +5184,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setPharmacyDispenseRecords(initialPharmacyDispenseRecords);
     setBedTransfers(initialBedTransfers);
     setHospitalPriceCatalog(initialHospitalPriceCatalog);
+    setDoctorPackages([]);
     setAuditLogs(initialAuditLogs);
     setCompliance(initialCompliance);
     setAdvancePayments(initialAdvancePayments);
@@ -4973,6 +5246,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       wardBeds: wardBeds.length,
       staff: staff.length,
       staffDutySchedules: staffDutySchedules.length,
+      doctorPackages: doctorPackages.length,
       pharmacy: pharmacy.length,
       auditLogs: auditLogs.length,
     };
@@ -5005,6 +5279,7 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           staff,
           pharmacy,
           hospitalPriceCatalog,
+          doctorPackages,
           saveHospitalPriceItem,
           deactivateHospitalPriceItem,
           auditLogs,
@@ -5195,12 +5470,18 @@ export const HospitalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         addStaff,
         deactivateStaff,
         updateStaff,
+        updateDoctorProfile,
         submitDoctorDutyChangeRequest,
         reviewDoctorDutyChangeRequest,
         staffDutySchedules,
         hospitalPriceCatalog,
+        doctorPackages,
         saveHospitalPriceItem,
         deactivateHospitalPriceItem,
+        saveDoctorPackage,
+        deactivateDoctorPackage,
+        assignDoctorPackageToToken,
+        submitPackagePreAuth,
         publishInsuranceApproval,
         recordInsuranceGatewayResponse,
         recordTriageAssessment: (patientId: string, assessment: any) => addTriageAssessment(patientId, assessment),

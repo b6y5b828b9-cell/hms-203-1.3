@@ -20,6 +20,7 @@ import {
 import { useHospital } from '../context/HospitalContext';
 import { Patient } from '../types';
 import { ReprintInvoiceModal } from './billing/ReprintInvoiceModal';
+import { PatientAvatar } from './PatientAvatar';
 
 export const PatientEnquiryView: React.FC = () => {
   const { patients, appointments, invoices, receptionTokens, currentUser, setActiveTab, setSelectedPatientId } = useHospital();
@@ -34,14 +35,23 @@ export const PatientEnquiryView: React.FC = () => {
   const selectedPatient =
     patients.find((p) => p.id === selectedPatientIdInternal) || patients[0];
 
-  const matchingPatients = searchQuery.trim()
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const matchingPatients = normalizedSearchQuery
     ? patients.filter(
         (p) =>
-          p.firstName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          p.lastName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          p.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          p.phone.includes(searchQuery) ||
-          p.email.toLowerCase().includes(searchQuery.toLowerCase())
+          [
+            p.firstName,
+            p.middleName,
+            p.lastName,
+            `${p.firstName} ${p.middleName || ''} ${p.lastName}`,
+            p.id,
+            p.phone,
+            p.email,
+            p.emiratesId,
+            p.passportNo,
+            p.nationality,
+            p.language,
+          ].some((value) => value?.toLowerCase().includes(normalizedSearchQuery))
       )
     : patients;
 
@@ -298,34 +308,44 @@ export const PatientEnquiryView: React.FC = () => {
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                placeholder="Search MRN, Name, Phone..."
+                placeholder="Search name, MRN, phone, ID, or nationality..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full bg-slate-50 border border-slate-300 rounded-lg py-1.5 pl-8 pr-3 text-xs focus:ring-2 focus:ring-blue-500/20 text-slate-900"
               />
             </div>
+            <p className="mt-2 text-[10px] font-medium text-slate-500">{matchingPatients.length} patient{matchingPatients.length === 1 ? '' : 's'}</p>
           </div>
 
           <div className="overflow-y-auto divide-y divide-slate-100 flex-1 space-y-1">
-            {matchingPatients.map((p) => {
+            {matchingPatients.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-slate-300 px-3 py-6 text-center text-xs text-slate-500">
+                {normalizedSearchQuery ? 'No patients match this search.' : 'No patient records available.'}
+              </p>
+            ) : matchingPatients.map((p) => {
               const isSelected = p.id === selectedPatient?.id;
               return (
-                <div
+                <button
                   key={p.id}
+                  type="button"
+                  aria-pressed={isSelected}
                   onClick={() => setSelectedPatientIdInternal(p.id)}
-                  className={`p-2.5 rounded-lg cursor-pointer transition flex items-center justify-between ${
+                  className={`w-full p-2.5 rounded-lg text-left cursor-pointer transition flex items-center justify-between ${
                     isSelected
                       ? 'bg-blue-50 border border-blue-200 text-blue-900'
                       : 'hover:bg-slate-50 text-slate-700 border border-transparent'
                   }`}
                 >
-                  <div className="min-w-0 pr-2">
-                    <div className="font-bold text-xs truncate flex items-center gap-1.5">
-                      <span>{p.firstName} {p.lastName}</span>
-                      <span className="text-[10px] text-slate-400 font-mono">({p.id})</span>
-                    </div>
-                    <div className="text-[10px] text-slate-500 truncate">
-                      {p.age}y · {p.gender} · {p.phone}
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <PatientAvatar patientId={p.id} name={`${p.firstName} ${p.lastName}`} gender={p.gender} imageUrl={p.photo || p.avatar} size="sm" />
+                    <div className="min-w-0">
+                      <div className="font-bold text-xs truncate flex items-center gap-1.5">
+                        <span>{p.firstName} {p.lastName}</span>
+                        <span className="text-[10px] text-slate-400 font-mono">({p.id})</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 truncate">
+                        {p.age}y · {p.gender} · {p.phone || 'No phone recorded'}
+                      </div>
                     </div>
                   </div>
                   <span
@@ -339,7 +359,7 @@ export const PatientEnquiryView: React.FC = () => {
                   >
                     {p.status}
                   </span>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -352,18 +372,31 @@ export const PatientEnquiryView: React.FC = () => {
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-full bg-blue-100 text-blue-700 font-bold text-sm flex items-center justify-center font-mono">
-                    {selectedPatient.bloodGroup}
-                  </div>
-                  <div>
-                    <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <PatientAvatar
+                    patientId={selectedPatient.id}
+                    name={patientFullName || `${selectedPatient.firstName} ${selectedPatient.lastName}`}
+                    gender={selectedPatient.gender}
+                    imageUrl={selectedPatient.photo || selectedPatient.avatar}
+                    size="lg"
+                  />
+                  <div className="min-w-0">
+                    <h3 className="flex flex-wrap items-center gap-2 text-base font-bold text-slate-900">
                       <span>{patientFullName || `${selectedPatient.firstName} ${selectedPatient.lastName}`}</span>
                       <span className="font-mono text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold">
                         {selectedPatient.id}
                       </span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                        selectedPatient.status === 'Emergency'
+                          ? 'bg-rose-100 text-rose-700'
+                          : selectedPatient.status === 'Inpatient'
+                            ? 'bg-indigo-100 text-indigo-700'
+                            : 'bg-emerald-100 text-emerald-700'
+                      }`}>
+                        {selectedPatient.status}
+                      </span>
                     </h3>
-                    <p className="text-xs text-slate-500">
-                      DOB: {selectedPatient.dob || `${selectedPatient.age} years old`} · {selectedPatient.gender} · Phone: {selectedPatient.phone}
+                    <p className="mt-1 text-xs text-slate-500">
+                      DOB: {selectedPatient.dob || 'Not recorded'} · {selectedPatient.age} years · {selectedPatient.gender} · Blood group: {selectedPatient.bloodGroup || 'Not recorded'}
                     </p>
                   </div>
                 </div>
@@ -422,6 +455,63 @@ export const PatientEnquiryView: React.FC = () => {
                 );
               })()}
             </div>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h4 className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-800">
+                <User className="h-3.5 w-3.5 text-blue-600" />
+                Patient details
+              </h4>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+                {[
+                  ['Date of birth', selectedPatient.dob || 'Not recorded'],
+                  ['Age / gender', `${selectedPatient.age} years · ${selectedPatient.gender}`],
+                  ['Blood group', selectedPatient.bloodGroup || 'Not recorded'],
+                  ['Nationality', selectedPatient.nationality || 'Not recorded'],
+                  ['Preferred language', selectedPatient.language || 'Not recorded'],
+                  ['Phone', selectedPatient.phone || 'Not recorded'],
+                  ['Email', selectedPatient.email || 'Not recorded'],
+                  ['Primary physician', selectedPatient.primaryPhysicianName || 'Not assigned'],
+                ].map(([label, value]) => (
+                  <div key={label} className="min-w-0 rounded-lg border border-slate-100 bg-slate-50 p-2.5">
+                    <span className="block text-[10px] font-bold uppercase text-slate-400">{label}</span>
+                    <span className="mt-1 block break-words text-xs font-semibold text-slate-800">{value}</span>
+                  </div>
+                ))}
+              </div>
+              {(selectedPatient.packageAssignments || []).length > 0 && (
+                <div className="mt-3 rounded-lg border border-teal-100 bg-teal-50 p-3">
+                  <h5 className="text-[10px] font-bold uppercase tracking-wide text-teal-800">Assigned doctor packages</h5>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    {selectedPatient.packageAssignments?.map((assignment) => (
+                      <div key={assignment.id} className="rounded-md border border-teal-100 bg-white p-2.5 text-xs">
+                        <strong className="block text-slate-900">{assignment.packageName} · {assignment.packageNumber}</strong>
+                        <span className="mt-1 block text-slate-600">{assignment.doctorName} · {assignment.coveragePercent}% coverage</span>
+                        <span className="mt-1 block text-[10px] text-slate-500">Valid {assignment.validFrom} through {assignment.validUntil}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <details className="mt-3 rounded-lg border border-slate-200">
+                <summary className="flex cursor-pointer items-center gap-1.5 px-3 py-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-50">
+                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
+                  Identifiers and insurance
+                </summary>
+                <div className="grid grid-cols-2 gap-2 border-t border-slate-100 p-3 sm:grid-cols-4">
+                  {[
+                    ['National ID', selectedPatient.emiratesId || 'Not recorded'],
+                    ['Passport', selectedPatient.passportNo || 'Not recorded'],
+                    ['Insurance card', insuranceCardNo],
+                    ['Policy / payer', policyName],
+                  ].map(([label, value]) => (
+                    <div key={label} className="min-w-0">
+                      <span className="block text-[10px] font-bold uppercase text-slate-400">{label}</span>
+                      <span className="mt-1 block break-words text-xs font-semibold text-slate-800">{value}</span>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            </section>
 
             {/* Medical History & Diagnoses */}
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3">
@@ -501,13 +591,14 @@ export const PatientEnquiryView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2">
+              <div role="group" aria-label="Patient records" className="flex gap-2 overflow-x-auto pb-1">
                 {detailTabs.map((tab) => (
                   <button
                     key={tab.id}
                     type="button"
+                    aria-pressed={detailTab === tab.id}
                     onClick={() => setDetailTab(tab.id)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition ${
+                    className={`inline-flex shrink-0 items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                       detailTab === tab.id
                         ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
                         : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -677,25 +768,6 @@ export const PatientEnquiryView: React.FC = () => {
                         })}
                       </div>
                     )}
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase text-slate-700">
-                      <User className="w-3.5 h-3.5 text-blue-600" />
-                      Patient Identity & Demographics
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-slate-700">
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Full Name</span><span className="font-bold text-slate-800">{patientFullName || `${selectedPatient.firstName} ${selectedPatient.lastName}`}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Age / Gender</span><span className="font-bold text-slate-800">{selectedPatient.age} yrs • {selectedPatient.gender}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Language</span><span className="font-bold text-slate-800">{selectedPatient.language || 'Not recorded'}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Nationality</span><span className="font-bold text-slate-800">{selectedPatient.nationality || 'Not recorded'}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Phone Number</span><span className="font-bold text-slate-800">{selectedPatient.phone || 'Not recorded'}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Email Address</span><span className="font-bold text-slate-800">{selectedPatient.email || 'Not recorded'}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">National ID No.</span><span className="font-bold text-slate-800">{selectedPatient.emiratesId || selectedPatient.id || 'Not recorded'}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Passport No.</span><span className="font-bold text-slate-800">{selectedPatient.passportNo || 'Not recorded'}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Insurance Card No.</span><span className="font-bold text-slate-800">{insuranceCardNo}</span></div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5"><span className="block text-[10px] uppercase font-bold text-slate-400">Policy Name</span><span className="font-bold text-slate-800">{policyName}</span></div>
-                    </div>
                   </div>
 
                   {(selectedPatient.insuranceCardImage || selectedPatient.supportDocumentImage) && (
